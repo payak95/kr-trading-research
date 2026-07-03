@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kr-trading-research"
+version = "0.1.0"
+description = "KR 주식 전략·지표·백테스트·스크리닝·AI 섀도 판단 — 브로커 무관 연구 레이어(kr-trading-bot/kr-trading-bot-toss 공용)"
+requires-python = ">=3.11"
+dependencies = [
+    "requests",
+    "redis",
+    "python-dotenv",
+    "google-genai>=1.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,29 @@
+# 비밀·런타임 상태·로그는 절대 커밋하지 않는다
+.env
+*.env
+!.env.example
+
+# 런타임 상태/로그 (git 밖에서 관리)
+*.log
+logs/
+state/
+*.sqlite
+*.sqlite3
+*.db
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# throwaway
+.tmp/
+
+# §6 임시 산출물 (작업 완료 시 삭제 대상이지만 안전망)
+checklist.md
+context-notes.md
