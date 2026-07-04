@@ -23,13 +23,8 @@ def rsi(series: list[float], n: int = 14) -> float | None:
 
 def ema(series: list[float], n: int) -> float | None:
     """지수이동평균 — 최근값 가중(계수 2/(n+1)). 앞 n 개 SMA 로 시드 후 순회. 부족하면 None."""
-    if n <= 0 or len(series) < n:
-        return None
-    k = 2.0 / (n + 1)
-    e = sum(series[:n]) / n  # 시드 = 첫 n 개 SMA
-    for x in series[n:]:
-        e = x * k + e * (1 - k)
-    return e
+    series_ema = _ema_series(series, n)
+    return series_ema[-1] if series_ema else None
 
 
 def _ema_series(series: list[float], n: int) -> list[float]:
