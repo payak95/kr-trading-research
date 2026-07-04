@@ -68,19 +68,19 @@ class Strategy:
         # 효과 파라미터 = mode 프리셋 ← 명시 오버라이드 머지(2A). qty·sma·rsi 는 eff 사용.
         eff = Params.from_dict({**self._defaults, **(ctx.get("params") or {})}).clamp().effective()
         closes = ctx.get("closes") or []
-        f = sma(closes, eff["sma_fast"])
-        s = sma(closes, eff["sma_slow"])
-        r = rsi(closes, RSI_PERIOD)
-        if f is None or s is None or r is None:
+        fast = sma(closes, eff["sma_fast"])
+        slow = sma(closes, eff["sma_slow"])
+        rsi_val = rsi(closes, RSI_PERIOD)
+        if fast is None or slow is None or rsi_val is None:
             return []  # 데이터 부족 → 판단 보류
 
-        uptrend = f > s
+        uptrend = fast > slow
         if not self._holding.get(code, False):
-            if uptrend and r <= eff["rsi_buy"]:
+            if uptrend and rsi_val <= eff["rsi_buy"]:
                 self._inflight[code] = True
                 return [Intent(side="buy", code=code, qty=eff["qty"], price=None)]
         else:
-            if r >= eff["rsi_sell"] or not uptrend:
+            if rsi_val >= eff["rsi_sell"] or not uptrend:
                 self._inflight[code] = True
                 return [Intent(side="sell", code=code, qty=eff["qty"], price=None)]
         return []
