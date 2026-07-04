@@ -48,13 +48,13 @@ def _badge(key, label, tone, detail):
 
 def ma_alignment(closes):
     """이평 정/역배열 — MA5>MA20>MA60(bull)/MA5<MA20<MA60(bear)/그 외 혼조. 세 MA 중 하나라도 없으면 None."""
-    a, b, c = sma(closes, 5), sma(closes, 20), sma(closes, 60)
-    if a is None or b is None or c is None:
+    ma5, ma20, ma60 = sma(closes, 5), sma(closes, 20), sma(closes, 60)
+    if ma5 is None or ma20 is None or ma60 is None:
         return None
-    nums = f"MA5 {_fmt(a)} · MA20 {_fmt(b)} · MA60 {_fmt(c)}"
-    if a > b > c:
+    nums = f"MA5 {_fmt(ma5)} · MA20 {_fmt(ma20)} · MA60 {_fmt(ma60)}"
+    if ma5 > ma20 > ma60:
         return _badge("ma_alignment", "정배열", "bull", nums)
-    if a < b < c:
+    if ma5 < ma20 < ma60:
         return _badge("ma_alignment", "역배열", "bear", nums)
     return _badge("ma_alignment", "이평 혼조", "neutral", nums)
 
