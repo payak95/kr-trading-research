@@ -22,6 +22,13 @@ MODE_PRESETS: dict[str, dict] = {
     "aggressive": {"qty": 2, "sma_fast": 5, "sma_slow": 20, "rsi_buy": 38.0, "rsi_sell": 74.0},
 }
 _STRAT_FIELDS = ("qty", "sma_fast", "sma_slow", "rsi_buy", "rsi_sell")
+_STRAT_RANGES = {  # (lo, hi, cast) — clamp() 의 전략필드 범위(실사용 범위보다 넉넉한 안전 상한선)
+    "qty": (1, 100, int),
+    "sma_fast": (1, 200, int),
+    "sma_slow": (2, 400, int),
+    "rsi_buy": (1.0, 99.0, float),
+    "rsi_sell": (1.0, 99.0, float),
+}
 _RISK_FIELDS = ("max_order_krw", "max_position_krw", "daily_loss_limit_krw", "max_open_positions")
 _RISK_RANGES = {  # 콘솔 오버라이드 안전 상한선(실수 방지용 — 실사용 범위보다 훨씬 넉넉)
     "max_order_krw": (10_000, 1_000_000_000),
@@ -53,16 +60,11 @@ class Params:
         self.enabled = bool(self.enabled)
         self.follow_regime = bool(self.follow_regime)
         self.mode = self.mode if self.mode in MODES else "neutral"
-        if self.qty is not None:
-            self.qty = max(1, min(int(self.qty), 100))
-        if self.sma_fast is not None:
-            self.sma_fast = max(1, min(int(self.sma_fast), 200))
-        if self.sma_slow is not None:
-            self.sma_slow = max(2, min(int(self.sma_slow), 400))
-        if self.rsi_buy is not None:
-            self.rsi_buy = min(max(float(self.rsi_buy), 1.0), 99.0)
-        if self.rsi_sell is not None:
-            self.rsi_sell = min(max(float(self.rsi_sell), 1.0), 99.0)
+        for f in _STRAT_FIELDS:
+            v = getattr(self, f)
+            if v is not None:
+                lo, hi, cast = _STRAT_RANGES[f]
+                setattr(self, f, max(lo, min(cast(v), hi)))
         if self.strategy_name is not None:
             self.strategy_name = self.strategy_name.strip()[:60] or None
         for f in _RISK_FIELDS:
