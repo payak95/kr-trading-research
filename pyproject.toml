@@ -12,6 +12,8 @@ dependencies = [
     "redis",
     "python-dotenv",
     "google-genai>=1.0.0",
+    "exchange-calendars>=4.5",  # core/holidays.py 거래일 판정(XKRX) — 미설치 시 평일만 폴백(휴장일 미반영)
+    "fakeredis",                # 테스트 전용(test_control_bus 등) — 프로덕션 미사용
 ]
 
 [tool.setuptools.packages.find]
