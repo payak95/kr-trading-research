@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kr_research.core.ai_store import UNIVERSE_CONFIG_NAME, AiStore
 from tools.backtest_worker import DEFAULT_DAYS, UNIVERSE_KEY, _cache_only_fetch
 from tools.llm_shadow import judge_from_bars, log_judgment
-from kr_research.trading.tracking import HORIZONS, summarize_actions
+from kr_research.trading.tracking import HORIZONS, summarize_actions, summarize_by_confidence
 
 _KST = timezone(timedelta(hours=9))
 K_JUDGMENTS = "bot:ai:universe:judgments"  # String(JSON list) — 콘솔 "① 유니버스 스크리닝" 결과 테이블
@@ -55,6 +55,7 @@ def publish_universe_view(r, store: AiStore, shortlist: list[str]) -> None:
     """콘솔 '① 유니버스 스크리닝' 뷰 재발행 — 개별 종목 뷰(publish_ai_view)와 별개 키."""
     rows = store.get_judgments(None, config_name=UNIVERSE_CONFIG_NAME)
     summary = summarize_actions(rows, HORIZONS)
+    summary["by_confidence"] = summarize_by_confidence(rows, HORIZONS)["by_mode"]
     r.set(K_JUDGMENTS, json.dumps(rows[:PUBLISH_LIMIT], ensure_ascii=False))
     r.set(K_SUMMARY, json.dumps(summary, ensure_ascii=False))
     r.set(K_SHORTLIST, json.dumps(

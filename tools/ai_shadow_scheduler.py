@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kr_research.core.ai_store import UNIVERSE_CONFIG_NAME, AiStore, decide_virtual_trade
 from tools.llm_shadow import log_judgment, run_once
-from kr_research.trading.tracking import HORIZONS, summarize_actions
+from kr_research.trading.tracking import HORIZONS, summarize_actions, summarize_by_confidence
 
 K_CONFIGS = "bot:ai_configs"     # Hash(콘솔 CRUD): name → {symbol,timeframe,lookback_days,interval_min,enabled}
 K_LAST_RUN = "bot:ai:last_run"   # Hash: name → epoch(마지막 시도 시각, 성공/실패 무관 — 재시도 폭주 방지)
@@ -39,6 +39,7 @@ def publish_ai_view(r, store: AiStore) -> None:
     스캔 300건이 최신순 상위를 차지해 개별 종목 판단이 밀려날 수 있음)."""
     rows = [row for row in store.get_judgments(None) if row["config_name"] != UNIVERSE_CONFIG_NAME]
     summary = summarize_actions(rows, HORIZONS)
+    summary["by_confidence"] = summarize_by_confidence(rows, HORIZONS)["by_mode"]
     r.set(K_JUDGMENTS, json.dumps(rows[:PUBLISH_LIMIT], ensure_ascii=False))
     r.set(K_SUMMARY, json.dumps(summary, ensure_ascii=False))
     positions = [row for row in store.get_positions() if row["config_name"] != UNIVERSE_CONFIG_NAME]

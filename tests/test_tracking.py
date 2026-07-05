@@ -5,7 +5,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from kr_research.trading.tracking import benchmark_returns, evaluate_exit, forward_returns, summarize, summarize_actions
+from kr_research.trading.tracking import (
+    benchmark_returns, confidence_bucket, evaluate_exit, forward_returns, summarize, summarize_actions,
+    summarize_by_confidence,
+)
 
 # exit 트리를 항상 False 로 둬 손절/익절 판정만 순수하게 격리 테스트(spec exit_condition 미간섭)
 _NOOP_EXIT_SPEC = {
@@ -156,8 +159,30 @@ def main() -> int:
     plain = summarize([{**r, "mode": r["action"]} for r in rows], (5,))["by_mode"]
     assert abs(plain["sell"]["avg_d5"] - 0.005) < 1e-9, "summarize() 는 부호 반전 없이 원본 그대로여야 함"
 
+    # ── confidence_bucket: 경계값(0.3/0.6)·None 처리 ──
+    assert confidence_bucket(None) == "unknown"
+    assert confidence_bucket(0.1) == "low"
+    assert confidence_bucket(0.29) == "low"
+    assert confidence_bucket(0.3) == "mid"   # 경계 포함(low<0.3)
+    assert confidence_bucket(0.59) == "mid"
+    assert confidence_bucket(0.6) == "high"  # 경계 포함(mid<0.6)
+    assert confidence_bucket(0.95) == "high"
+
+    # ── summarize_by_confidence: sell 부호반전은 summarize_actions 와 동일, 그룹 키만 confidence 버킷 ──
+    rows_c = [
+        {"action": "buy",  "confidence": 0.9, "ret_d5": 0.05, "bench_d5": 0.0},   # high, 적중
+        {"action": "buy",  "confidence": 0.2, "ret_d5": -0.01, "bench_d5": 0.0},  # low, 오판
+        {"action": "sell", "confidence": 0.8, "ret_d5": -0.03, "bench_d5": 0.0},  # high, 반전 → +0.03(적중)
+        {"action": "hold", "confidence": None, "ret_d5": 0.0, "bench_d5": None},  # unknown
+    ]
+    sc = summarize_by_confidence(rows_c, (5,))["by_mode"]
+    assert abs(sc["high"]["avg_d5"] - 0.04) < 1e-9, sc["high"]   # (0.05 + 0.03)/2
+    assert abs(sc["low"]["avg_d5"] - (-0.01)) < 1e-9, sc["low"]
+    assert sc["unknown"]["signals"] == 1, sc["unknown"]
+
     print("✅ test_tracking: forward_returns·benchmark_returns·초과수익·게이트(알파 조건)·"
-          "evaluate_exit(손절·익절·불변식·exit_condition·비용모델·capped)·summarize_actions(sell 부호반전) 통과")
+          "evaluate_exit(손절·익절·불변식·exit_condition·비용모델·capped)·summarize_actions(sell 부호반전)·"
+          "confidence_bucket·summarize_by_confidence 통과")
     return 0
 
 

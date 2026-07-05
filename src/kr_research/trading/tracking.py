@@ -89,26 +89,54 @@ def summarize(signals, horizons=HORIZONS, gate=GATE):
             "all": _agg(signals, horizons, gate)}
 
 
-def summarize_actions(rows, horizons=HORIZONS, gate=GATE):
-    """buy/sell/hold 액션 판단(row 에 'action' 필드, 예: AI 섀도 판단) 전용 집계 — summarize(mode:=action)
-    를 그대로 재사용하되, action="sell" 인 행만 ret_d{n}·bench_d{n} 부호를 미리 뒤집는다. summarize() 의
-    avg/win 은 "가격이 올랐는가"를 승리로 보는데, sell 은 반대로 가격이 내려가야 판단이 맞은 것이라
-    부호 반전 없이 그대로 쓰면 avg_d5>0 이 오히려 "판단이 틀렸다"는 뜻이 된다. 부호를 미리 뒤집으면
-    avg/win/초과수익(win/avg_excess)이 buy·hold 와 마찬가지로 "판단이 맞았는가"로 통일되게 해석된다
-    (buy·hold 는 원래 부호 그대로 — hold 는 뚜렷한 방향이 없다는 판단이라 반전 대상 아님).
-    ret_d{n}·bench_d{n} 을 함께 뒤집어야 초과수익(ret-bench)도 올바르게 부호 반전된다(각각 따로 뒤집으면
-    초과수익 계산이 깨짐). _agg 자체(순수 집계 수식)는 손대지 않는다 — buy 전용 forward-tracking(screen_track
-    등, mode 가 액션이 아닌 프리셋/톤을 의미) 에 영향 없음."""
+def _sign_flip_by_action(rows, horizons, mode_of):
+    """행마다 action="sell" 이면 ret_d{n}·bench_d{n} 부호를 뒤집고 'mode' 필드를 mode_of(row) 로 교체.
+    summarize() 의 avg/win 은 "가격이 올랐는가"를 승리로 보는데, sell 은 반대로 가격이 내려가야 판단이
+    맞은 것이라 부호 반전 없이 그대로 쓰면 avg_d5>0 이 오히려 "판단이 틀렸다"는 뜻이 된다. 부호를 미리
+    뒤집으면 avg/win/초과수익이 buy·hold 와 마찬가지로 "판단이 맞았는가"로 통일되게 해석된다(buy·hold 는
+    원래 부호 그대로 — hold 는 뚜렷한 방향이 없다는 판단이라 반전 대상 아님). ret_d{n}·bench_d{n} 을
+    함께 뒤집어야 초과수익(ret-bench)도 올바르게 부호 반전된다(각각 따로 뒤집으면 계산이 깨짐)."""
     signed = []
     for row in rows:
-        action = row.get("action") or "hold"
-        flip = -1 if action == "sell" else 1
-        r = {**row, "mode": action}
+        flip = -1 if (row.get("action") or "hold") == "sell" else 1
+        r = {**row, "mode": mode_of(row)}
         for n in horizons:
             for key in (f"ret_d{n}", f"bench_d{n}"):
                 if r.get(key) is not None:
                     r[key] = r[key] * flip
         signed.append(r)
+    return signed
+
+
+def summarize_actions(rows, horizons=HORIZONS, gate=GATE):
+    """buy/sell/hold 액션 판단(row 에 'action' 필드, 예: AI 섀도 판단) 전용 집계 — summarize(mode:=action)
+    를 그대로 재사용하되 sell 행의 부호를 먼저 뒤집는다(_sign_flip_by_action). _agg 자체(순수 집계 수식)는
+    손대지 않는다 — buy 전용 forward-tracking(screen_track 등, mode 가 액션이 아닌 프리셋/톤을 의미) 에
+    영향 없음."""
+    signed = _sign_flip_by_action(rows, horizons, lambda row: row.get("action") or "hold")
+    return summarize(signed, horizons, gate)
+
+
+CONFIDENCE_BUCKETS = (0.3, 0.6)  # (low<0.3, mid 0.3~0.6, high>=0.6) — 경계는 임의 3분할, 필요시 조정
+
+
+def confidence_bucket(confidence) -> str:
+    """confidence(0~1 또는 None) → "low"|"mid"|"high"|"unknown" 라벨."""
+    if confidence is None:
+        return "unknown"
+    lo, hi = CONFIDENCE_BUCKETS
+    if confidence < lo:
+        return "low"
+    if confidence < hi:
+        return "mid"
+    return "high"
+
+
+def summarize_by_confidence(rows, horizons=HORIZONS, gate=GATE):
+    """AI 판단(row 에 'action'+'confidence' 필드)을 신뢰도 구간별로 집계 — "확신도가 높을수록 실제로
+    더 잘 맞았는가"(캘리브레이션)를 보기 위함. summarize_actions 와 동일하게 sell 부호만 먼저 뒤집고
+    (판단이 맞았는지가 기준), 그룹 키만 action 대신 confidence 버킷을 쓴다."""
+    signed = _sign_flip_by_action(rows, horizons, lambda row: confidence_bucket(row.get("confidence")))
     return summarize(signed, horizons, gate)
 
 
