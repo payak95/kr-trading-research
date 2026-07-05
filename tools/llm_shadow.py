@@ -19,7 +19,11 @@ from kr_research.trading import indicators as ind
 
 _KST = timezone(timedelta(hours=9))
 _MODEL = "gemini-flash-lite-latest"  # telegram-market-bot 과 동일(저비용) 모델로 통일 — 대량 스캔·개별 관찰 기본
-_MODEL_PRO = "gemini-pro-latest"  # 유니버스 사전 필터(is_notable) 통과분만 정밀 판단용(tools/ai_universe_scan.py)
+# 유니버스 사전 필터(is_notable) 통과분만 정밀 판단용(tools/ai_universe_scan.py). 처음엔 gemini-pro-latest
+# 를 썼는데 실측 결과 thinking 토큰(1,388개/호출)까지 출력 단가로 청구돼 월 예산(10,000원)을 크게 초과
+# (약 67,500원/월 추정) — thinking_budget=0(call_gemini 참고)과 함께 이 모델로 낮춰 예산 안에 맞춤
+# (실측 약 3,200원/월, flash-lite보다는 낫고 pro보다 훨씬 저렴).
+_MODEL_STAGE2 = "gemini-3-flash-preview"
 _PROMPT_VERSION = "v2"  # build_prompt() 문구가 바뀌면 올린다 — 저장 레코드에 심어 전진검증 통계가 프롬프트
                         # 버전 간에 섞이지 않게 구분 가능(과거 레코드엔 소급 불가하니 지금부터 기록)
 _STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state", "shadow_judgments.jsonl")
@@ -127,13 +131,20 @@ def parse_judgment(text: str) -> dict | None:
 def call_gemini(prompt: str, api_key: str, model: str = _MODEL) -> dict | None:
     """일시 오류(429/5xx)는 지수 백오프로 최대 _ATTEMPTS 회 재시도, 비일시적 오류는 즉시 raise
     (telegram-market-bot/tools/summarize.py 와 동일 패턴, 모델은 호출부가 고르되 폴백은 없음).
-    model: 기본은 저비용 _MODEL, 유니버스 사전 필터 통과분만 _MODEL_PRO 로 정밀 판단(ai_universe_scan.py)."""
+    model: 기본은 저비용 _MODEL, 유니버스 사전 필터 통과분만 _MODEL_STAGE2 로 정밀 판단(ai_universe_scan.py).
+
+    thinking_budget=0 을 항상 명시 — 실측 결과 gemini-3-flash-preview/gemini-3.1-pro-preview 는 응답에
+    안 보이는 thinking 토큰을 수백~천 단위로 태우고 이게 출력 단가로 청구돼(월 예산 10,000원 기준 초과의
+    핵심 원인이었음). 0으로 끄면 CoT 응답 품질(market_context_analysis 등)은 그대로 나오면서 비용만 빠짐.
+    flash-lite 는 원래 thinking 이 없는 모델이라 이 옵션을 줘도 안전(실측 확인, 에러 없음)."""
     from google import genai
+    from google.genai import types
     client = genai.Client(api_key=api_key)  # 변수 보관 필수 — 인라인 호출 시 finalizer 가 httpx 클라이언트를 조기 종료(공유 메모리 known pitfall)
+    config = types.GenerateContentConfig(thinking_config=types.ThinkingConfig(thinking_budget=0))
     last_exc = None
     for attempt in range(_ATTEMPTS):
         try:
-            resp = client.models.generate_content(model=model, contents=prompt)
+            resp = client.models.generate_content(model=model, contents=prompt, config=config)
             return parse_judgment((resp.text or "").strip())
         except Exception as exc:
             last_exc = exc

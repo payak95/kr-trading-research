@@ -44,7 +44,7 @@ def main() -> int:
         # "035420" 은 캐시 없음(콜드미스)
 
         def _fake_judge(code, bars, api_key, last_trade_date=None, model=None):
-            assert model == scan._MODEL_PRO, "사전 필터 통과분은 정밀 모델(_MODEL_PRO)로 호출돼야 함"
+            assert model == scan._MODEL_STAGE2, "사전 필터 통과분은 정밀 모델(_MODEL_STAGE2)로 호출돼야 함"
             return _rec(code, "buy" if code == "005930" else "hold")
 
         with patch("tools.ai_universe_scan.judge_from_bars", side_effect=_fake_judge), \
@@ -73,11 +73,11 @@ def main() -> int:
             mock_judge.return_value = None  # dedup 스킵 시뮬레이션
             scan.scan_universe(r, store, ["005930"], api_key="fake-key")
         assert mock_judge.call_args.kwargs["last_trade_date"] == "20260201"
-        assert mock_judge.call_args.kwargs["model"] == scan._MODEL_PRO
+        assert mock_judge.call_args.kwargs["model"] == scan._MODEL_STAGE2
 
         store.close()
 
-    print("✅ test_ai_universe_scan: 캐시 재사용(콜드미스 skip)·사전 필터(is_notable)·Pro 모델 전달·"
+    print("✅ test_ai_universe_scan: 캐시 재사용(콜드미스 skip)·사전 필터(is_notable)·정밀 모델(_MODEL_STAGE2) 전달·"
           "숏리스트·발행 분리 통과")
     return 0
 

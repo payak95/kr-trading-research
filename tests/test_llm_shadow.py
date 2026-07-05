@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from tools.llm_shadow import (
-    _MODEL, _MODEL_PRO, _PROMPT_VERSION, build_prompt, build_snapshot, call_gemini, is_notable, judge_from_bars,
+    _MODEL, _MODEL_STAGE2, _PROMPT_VERSION, build_prompt, build_snapshot, call_gemini, is_notable, judge_from_bars,
     parse_judgment, run_once,
 )
 
@@ -68,15 +68,22 @@ def main() -> int:
                        "market_context_analysis": "", "counter_argument": ""}, "429 이후 재시도로 성공해야 함"
     assert mock_client.models.generate_content.call_count == 2
 
-    # call_gemini — model 파라미터 미지정 시 기본(_MODEL), 지정 시 그대로 전달(유니버스 필터 통과분→_MODEL_PRO)
+    # call_gemini — model 파라미터 미지정 시 기본(_MODEL), 지정 시 그대로 전달(유니버스 필터 통과분→_MODEL_STAGE2)
     mock_client3 = MagicMock()
     mock_client3.models.generate_content.return_value = MagicMock(
         text='{"action":"hold","confidence":0.5,"reason":"x"}')
     with patch("google.genai.Client", return_value=mock_client3):
         call_gemini("prompt", "fake-key")
         assert mock_client3.models.generate_content.call_args.kwargs["model"] == _MODEL
-        call_gemini("prompt", "fake-key", model=_MODEL_PRO)
-        assert mock_client3.models.generate_content.call_args.kwargs["model"] == _MODEL_PRO
+        call_gemini("prompt", "fake-key", model=_MODEL_STAGE2)
+        assert mock_client3.models.generate_content.call_args.kwargs["model"] == _MODEL_STAGE2
+
+    # call_gemini — thinking_budget=0 을 항상 명시(실측: gemini-3-flash-preview/pro 는 응답에 안 보이는
+    # thinking 토큰을 출력 단가로 청구해 월 예산을 크게 초과시켰음 — 0으로 꺼서 비용만 제거)
+    with patch("google.genai.Client", return_value=mock_client3):
+        call_gemini("prompt", "fake-key")
+        cfg = mock_client3.models.generate_content.call_args.kwargs["config"]
+        assert cfg.thinking_config.thinking_budget == 0, "thinking 토큰 비용을 막으려면 항상 0이어야 함"
 
     # call_gemini — 비일시적 오류(예: 인증 실패)는 재시도 없이 즉시 raise
     mock_client2 = MagicMock()
@@ -105,9 +112,9 @@ def main() -> int:
     # run_once — model 을 넘기면(유니버스 필터 통과분 전용) call_gemini 에 그대로 전달되고 레코드에도 남음
     with patch("tools.llm_shadow.daily_ohlcv", return_value=fake_bars), \
          patch("tools.llm_shadow.call_gemini", return_value={"action": "buy", "confidence": 0.9, "reason": "y"}) as mock_gemini:
-        rec_pro = run_once("005930", lookback_days=60, api_key="fake-key", model=_MODEL_PRO)
-    assert rec_pro["model"] == _MODEL_PRO
-    assert mock_gemini.call_args[0][2] == _MODEL_PRO, "call_gemini 세 번째 위치 인자로 model 전달돼야 함"
+        rec_pro = run_once("005930", lookback_days=60, api_key="fake-key", model=_MODEL_STAGE2)
+    assert rec_pro["model"] == _MODEL_STAGE2
+    assert mock_gemini.call_args[0][2] == _MODEL_STAGE2, "call_gemini 세 번째 위치 인자로 model 전달돼야 함"
 
     # run_once — 봉 부족이면 None(Gemini 호출 자체를 안 함)
     with patch("tools.llm_shadow.daily_ohlcv", return_value=fake_bars[:10]), \
