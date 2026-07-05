@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -12,6 +13,7 @@ from fakeredis import FakeRedis
 
 from kr_research.core.ai_store import AiStore
 from tools import ai_shadow_scheduler as sched
+from tools.ai_shadow_scheduler import _due
 
 
 def _rec(action="buy"):
@@ -20,9 +22,36 @@ def _rec(action="buy"):
             "snapshot": {"close": 70000}}
 
 
+def _test_due_market_gate() -> None:
+    """_due() — 주기 경과 + 장 상태 게이트(휴장일·야간에 Naver/Yahoo 호출 자체를 생략해 차단 위험을 줄임)."""
+    daily_cfg = {"timeframe": "daily", "interval_min": 60}
+    minute_cfg = {"timeframe": "30m", "interval_min": 30}
+
+    with patch("tools.ai_shadow_scheduler.is_trading_day", return_value=True), \
+         patch("tools.ai_shadow_scheduler.is_market_open", return_value=True):
+        assert not _due(daily_cfg, time.time()), "60분 안 지났으면 daily 도 False"
+        assert not _due(minute_cfg, time.time()), "30분 안 지났으면 분봉도 False"
+        assert _due(daily_cfg, None), "첫 실행(last_run=None)+거래일이면 True"
+        assert _due(minute_cfg, time.time() - 1801), "30분 경과+장중이면 True"
+
+    with patch("tools.ai_shadow_scheduler.is_trading_day", return_value=False):
+        assert not _due(daily_cfg, None), "휴장일이면 첫 실행이어도 False(Naver 호출 생략)"
+        assert not _due(daily_cfg, time.time() - 3601), "휴장일이면 주기 경과해도 False"
+
+    with patch("tools.ai_shadow_scheduler.is_market_open", return_value=False):
+        assert not _due(minute_cfg, time.time() - 1801), "장외(야간·주말·공휴일)면 False(Yahoo 호출 생략)"
+
+
 def main() -> int:
+    _test_due_market_gate()
+
     r = FakeRedis(decode_responses=True)
-    with tempfile.TemporaryDirectory() as d:
+    # 아래 회귀 테스트들은 due 판정 자체가 아니라 스케줄러의 다른 동작(dedup·에러 격리·발행 등)을 검증하는
+    # 것이라, 실행하는 날의 요일/시간과 무관하게 항상 장이 열린 것으로 고정(그렇지 않으면 주말에 이 테스트를
+    # 돌리면 새로 추가한 장 상태 게이트에 걸려 아래 assert 들이 전부 실패하는 flaky 테스트가 됨).
+    with patch("tools.ai_shadow_scheduler.is_trading_day", return_value=True), \
+         patch("tools.ai_shadow_scheduler.is_market_open", return_value=True), \
+         tempfile.TemporaryDirectory() as d:
         store = AiStore(db_path=os.path.join(d, "t.db"))
 
         # 설정 3개: 활성(due) / 비활성 / 활성이지만 아직 due 아님(방금 돈 것으로 설정)

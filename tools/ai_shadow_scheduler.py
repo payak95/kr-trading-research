@@ -15,6 +15,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kr_research.core.ai_store import UNIVERSE_CONFIG_NAME, AiStore, decide_virtual_trade
+from kr_research.core.holidays import is_market_open, is_trading_day
 from tools.llm_shadow import log_judgment, run_once
 from kr_research.trading.tracking import HORIZONS, summarize_actions, summarize_by_confidence
 
@@ -28,8 +29,15 @@ PUBLISH_LIMIT = 200
 
 
 def _due(cfg: dict, last_run: float | None) -> bool:
+    """interval_min 경과 + 장 상태 게이트. daily 는 거래일이면 되고(마감 후 종가 반영을 언제든 잡아야
+    하니 정규장 시간까지 좁히지 않음), 분봉(5m/30m/60m)은 정규장(09:00~15:30 KST) 안에서만 — 장 밖에는
+    새 봉이 안 생겨 호출해봐야 헛수고인데, cron 이 요일 제한 없이 24시간 돌아서 그대로 두면 주말·야간에도
+    Naver/Yahoo 를 계속 두드리게 된다(무료 API 라도 지속 호출 시 차단 위험)."""
     interval_min = max(int(cfg.get("interval_min") or 60), 1)
-    return last_run is None or time.time() >= last_run + interval_min * 60
+    if not (last_run is None or time.time() >= last_run + interval_min * 60):
+        return False
+    timeframe = cfg.get("timeframe") or "daily"
+    return is_trading_day() if timeframe == "daily" else is_market_open()
 
 
 def publish_ai_view(r, store: AiStore) -> None:
