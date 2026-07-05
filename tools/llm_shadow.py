@@ -221,7 +221,7 @@ def main() -> int:
         print(f"[llm_shadow] {code} 일봉 부족 또는 Gemini 응답 파싱 실패 — skip")
         return 1
 
-    log_judgment(record, cfg.redis_url, cfg.tenant)
+    log_judgment(record, cfg.redis_url, tenant="ai")  # ai_shadow_scheduler.py 와 동일 관례(Config 에 tenant 필드 없음)
     print(f"[llm_shadow] {code} → {record['action']} (확신도 {record['confidence']}) — {record['reason']}")
     return 0
 
