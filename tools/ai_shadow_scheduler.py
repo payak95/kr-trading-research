@@ -71,7 +71,9 @@ def run_scheduler(r, store: AiStore, api_key: str) -> int:
                 log_judgment(record, redis_url="", tenant="ai")  # JSONL 감사만(Redis 발행은 publish_ai_view 가 별도로)
                 # 가상 포지션 시뮬레이터(섀도 — 실제 주문 없음) — trading/strategy.py 의 보유 게이트와 동일 규칙.
                 open_pos = store.get_open_position(name, code)
-                trade = decide_virtual_trade(open_pos, record["action"], record["entry_price"])
+                trade = decide_virtual_trade(open_pos, record["action"], record["entry_price"],
+                                              confidence=record.get("confidence"),
+                                              min_confidence=cfg.get("min_confidence"))
                 if trade and trade["kind"] == "open":
                     store.open_position(name, code, trade["qty"], record["entry_price"], record["trade_date"])
                 elif trade and trade["kind"] == "close":

@@ -77,6 +77,16 @@ def main() -> int:
 
         assert decide_virtual_trade(None, "buy", 0) is None, "진입가<=0 은 무동작(방어)"
 
+        # ── min_confidence 사이징: buy 는 confidence 미달이면 무동작, sell 은 confidence 무관 항상 허용 ──
+        assert decide_virtual_trade(None, "buy", 70000, confidence=0.5, min_confidence=0.7) is None, \
+            "확신도 미달 매수는 무동작"
+        assert decide_virtual_trade(None, "buy", 70000, confidence=None, min_confidence=0.7) is None, \
+            "confidence 없음+임계값 설정 시 매수 무동작(방어)"
+        gated_open = decide_virtual_trade(None, "buy", 70000, order_krw=1_000_000, confidence=0.8, min_confidence=0.7)
+        assert gated_open == {"kind": "open", "qty": 14}, "확신도 충족 매수는 정상 진행"
+        gated_close = decide_virtual_trade(fake_pos, "sell", 77000, confidence=0.1, min_confidence=0.7)
+        assert gated_close["kind"] == "close", "매도는 확신도 임계값과 무관하게 항상 허용"
+
         # ── 가상 포지션 원장 라운드트립 ──
         with patch("kr_research.core.ai_store.time.time", return_value=2000.0):
             s.open_position("cfg1", "005930", 14, 70000.0, "20260701")
