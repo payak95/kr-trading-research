@@ -126,9 +126,10 @@ def build_prompt(code: str, snapshot: dict) -> str:
 
 def build_combo_prompt(code: str, parent_label: str, parent_snapshot: dict,
                        child_label: str, child_snapshot: dict) -> str:
-    """③ 콤보 관찰 전용 프롬프트 — 상위 프레임(대세 필터 통과분)과 하위 프레임(타점 트리거 통과분)
-    스냅샷을 함께 넘겨, 상위 추세를 거스르지 않는 선에서 하위 타이밍이 실제로 진입할 만한지 최종 판단
-    시킨다. CoT 스키마는 build_prompt 와 동일(market_context_analysis/counter_argument 선행)."""
+    """③ 콤보 관찰 전용 프롬프트 — 상위 프레임(대세 게이트 통과분)과 하위 프레임(필터 없음, 그대로) 스냅샷을
+    함께 넘겨, 대세를 거스르지 않는 선에서 하위 프레임의 단기 타이밍을 Gemini 가 스스로 종합 판단하게
+    한다. 하위 프레임엔 규칙 기반 사전 필터(is_notable)가 더 이상 없음 — 타이밍 판단 자체를 전적으로
+    Gemini 에게 맡기기로 한 오너 결정(2026-07, judge_combo 참고). CoT 스키마는 build_prompt 와 동일."""
     parent_payload = json.dumps(parent_snapshot, ensure_ascii=False, separators=(",", ":"))
     child_payload = json.dumps(child_snapshot, ensure_ascii=False, separators=(",", ":"))
     return (
@@ -137,11 +138,12 @@ def build_combo_prompt(code: str, parent_label: str, parent_snapshot: dict,
         f"{_HISTORY_LEN}봉 추이)이야.\n"
         f"상위 프레임({parent_label}): {parent_payload}\n"
         f"하위 프레임({child_label}): {child_payload}\n\n"
-        "상위 프레임에서 이미 대세가 매수 우호적이라고 1차로 걸러졌고, 하위 프레임에서 구체적인 진입 "
-        "신호가 포착돼 여기까지 왔어. 다른 지식(뉴스·펀더멘털)은 쓰지 마. 결론을 바로 내지 말고 아래 "
-        "순서로 먼저 분석한 뒤 최종 판단해:\n"
-        "1) market_context_analysis: 상위 프레임의 대세와 하위 프레임의 타이밍이 서로 부합하는지 "
-        "한국어 한 문장\n"
+        "상위 프레임에서 대세가 매수하기 나쁘지 않은 상태라는 건 이미 확인됐어. 하위 프레임에는 아무 "
+        "필터도 걸려있지 않으니, 지금이 실제로 진입할 만한 타이밍인지 하위 프레임 지표를 보고 스스로 "
+        "종합적으로 판단해. 다른 지식(뉴스·펀더멘털)은 쓰지 마. 결론을 바로 내지 말고 아래 순서로 먼저 "
+        "분석한 뒤 최종 판단해:\n"
+        "1) market_context_analysis: 하위 프레임 지표가 지금 진입할 만한 타이밍인지, 아니면 관망해야 "
+        "하는 상황인지 한국어 한 문장\n"
         "2) counter_argument: 지금 판단을 내리기 전에 반박할 만한 리스크나 두 프레임 간에 모순되는 "
         "지표가 있다면 한국어 한 문장(없으면 \"없음\")\n"
         "3) 위 분석을 바탕으로 상위 프레임의 대세를 거스르지 않는 선에서 매수/매도/보유 중 하나를 "
@@ -273,20 +275,25 @@ def judge_combo(code: str, parent_timeframe: str, parent_bars: list[dict], child
                 child_bars: list[dict], api_key: str, last_trade_date: str | None = None,
                 model: str = _MODEL_STAGE2) -> dict | None:
     """③ 콤보 관찰 핵심 로직(tools/ai_combo_scheduler.py 전용) — 상위 프레임으로 대세 허가(_parent_permits)
-    를 먼저 확인하고, 통과했을 때만 하위 프레임의 로컬 트리거(is_notable)를 확인한다. 둘 다 통과해야만
-    Gemini 를 호출(build_combo_prompt) — 어느 한쪽이라도 막히면 Gemini 호출 없이 None(무료).
+    를 먼저 확인하고, 통과했을 때만 Gemini 를 호출(build_combo_prompt). 허가 안 되면 Gemini 호출 없이
+    None(무료) — 대세를 거스르는 진입은 코드 차원에서 원천 차단하는 구조적 안전장치는 유지.
+
+    하위 프레임엔 규칙 기반 사전 필터(is_notable)를 더 이상 안 건다 — 예전엔 상위·하위 둘 다 파이썬
+    게이트를 통과해야 Gemini 를 불렀는데, 오너가 하위 프레임의 단기 타이밍 판단만큼은 규칙이 아니라
+    Gemini 의 종합적 판단에 전적으로 맡기기로 결정(2026-07). 상위 게이트만 유지하는 이유는 "대세를
+    거스르는 매매는 원천 차단"이라는 이 기능의 핵심 취지가 하위 게이트 제거와는 무관하기 때문.
 
     entry_price/trade_date 는 하위(자식) 프레임 기준으로 명시적으로 설정한다 — 중첩된 snapshot 딕셔너리엔
     최상위 "close" 가 없어서 judge_from_bars 처럼 자동으로는 못 뽑는다. 이래야 ai_forward_eval.py 가
     코드 변경 없이 그대로 D+N 평가에 재사용 가능(trade_date 로 dedup·forward_returns 계산에 씀).
 
-    last_trade_date 는 하위 프레임의 최신 봉 날짜와 비교 — 상위 프레임은 느리게 바뀌므로 "새 타점이
-    왔는가"가 재판단 여부의 실질적 기준."""
+    last_trade_date 는 하위 프레임의 최신 봉 날짜와 비교 — 하위 게이트는 없어졌어도 dedup 은 그대로
+    유지(데이터 안정성 — 같은 봉을 반복해서 물으면 온도 샘플링 때문에 답이 오락가락하는 노이즈만 생김)."""
     parent_snapshot = build_snapshot(parent_bars)
     if parent_snapshot is None or not _parent_permits(parent_snapshot):
         return None
     child_snapshot = build_snapshot(child_bars)
-    if child_snapshot is None or not is_notable(child_snapshot):
+    if child_snapshot is None:
         return None
     trade_date = child_bars[-1]["date"]
     if last_trade_date is not None and trade_date == last_trade_date:

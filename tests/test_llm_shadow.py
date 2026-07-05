@@ -167,55 +167,55 @@ def main() -> int:
         assert bars == fake_bars
         mock_intraday.assert_called_once_with("005930", "60m")
 
-    # ── ③ 콤보 관찰: build_combo_prompt·judge_combo ──
+    # ── ③ 콤보 관찰: build_combo_prompt·judge_combo(하위 게이트 제거, 상위 게이트+dedup 만 유지) ──
     parent_prompt = build_combo_prompt("005930", "daily", {"close": 70000}, "60m", {"close": 70100})
     assert "daily" in parent_prompt and "60m" in parent_prompt
     assert '"close":70000' in parent_prompt and '"close":70100' in parent_prompt
     assert "market_context_analysis" in parent_prompt and "counter_argument" in parent_prompt
+    assert "이미 1차로 걸러졌고" not in parent_prompt, "하위 게이트가 없어졌으니 이미 필터링됐다는 거짓 전제가 있으면 안 됨"
+    assert "필터도 걸려있지 않으니" in parent_prompt, "하위 프레임은 필터 없이 그대로 넘긴다는 문구가 있어야 함"
 
     parent_bars_ok = fake_bars  # close 50600, sma20 계산상 종가 우상향이라 close>=sma20 성립(과거 확인된 패턴)
-    child_bars_notable = [{"date": f"202601{(i % 28) + 1:02d}", "close": 50000 + i * 10,
-                            "high": 50200 + i * 10, "low": 49800 + i * 10,
-                            "volume": 500000 if i == 59 else 10000} for i in range(60)]  # 마지막 봉 거래량 급증
+    child_bars = [{"date": f"202601{(i % 28) + 1:02d}", "close": 50000 + i * 10,
+                   "high": 50200 + i * 10, "low": 49800 + i * 10, "volume": 10000} for i in range(60)]
 
-    # 상위 프레임 게이트가 막으면(대세 하락) Gemini 호출 자체를 안 함
+    # 상위 프레임 게이트가 막으면(대세 하락) Gemini 호출 자체를 안 함 — 이 안전장치만 유지
     with patch("tools.llm_shadow._parent_permits", return_value=False), \
          patch("tools.llm_shadow.call_gemini") as mock_gemini:
-        assert judge_combo("005930", "daily", parent_bars_ok, "60m", child_bars_notable, "fake-key") is None
+        assert judge_combo("005930", "daily", parent_bars_ok, "60m", child_bars, "fake-key") is None
         mock_gemini.assert_not_called()
 
-    # 상위는 허가했지만 하위 프레임에 특이점이 없으면(is_notable=False) Gemini 호출 안 함
+    # 상위 게이트만 통과하면(하위 프레임에 특이점이 있든 없든 무관) 바로 Gemini 호출 —
+    # is_notable 은 더 이상 호출조차 안 하니 patch 없이도 그대로 통과해야 함
     with patch("tools.llm_shadow._parent_permits", return_value=True), \
-         patch("tools.llm_shadow.is_notable", return_value=False), \
-         patch("tools.llm_shadow.call_gemini") as mock_gemini:
-        assert judge_combo("005930", "daily", parent_bars_ok, "60m", child_bars_notable, "fake-key") is None
-        mock_gemini.assert_not_called()
-
-    # 둘 다 통과하면 build_combo_prompt 로 Gemini 호출, entry_price/trade_date 는 하위(자식) 프레임 기준
-    with patch("tools.llm_shadow._parent_permits", return_value=True), \
-         patch("tools.llm_shadow.is_notable", return_value=True), \
          patch("tools.llm_shadow.call_gemini",
                return_value={"action": "buy", "confidence": 0.8, "reason": "z"}) as mock_gemini:
-        rec = judge_combo("005930", "daily", parent_bars_ok, "60m", child_bars_notable, "fake-key")
+        rec = judge_combo("005930", "daily", parent_bars_ok, "60m", child_bars, "fake-key")
     assert rec is not None
-    assert rec["trade_date"] == child_bars_notable[-1]["date"], "trade_date 는 하위(자식) 프레임 기준"
-    assert rec["entry_price"] == child_bars_notable[-1]["close"], "entry_price 는 하위(자식) 프레임 기준"
+    mock_gemini.assert_called_once()
+    assert rec["trade_date"] == child_bars[-1]["date"], "trade_date 는 하위(자식) 프레임 기준"
+    assert rec["entry_price"] == child_bars[-1]["close"], "entry_price 는 하위(자식) 프레임 기준"
     assert rec["snapshot"]["_prompt_version"] == _COMBO_PROMPT_VERSION
     assert "parent" in rec["snapshot"] and "child" in rec["snapshot"], "상위·하위 스냅샷이 함께 저장돼야 함"
     assert rec["model"] == _MODEL_STAGE2, "콤보 기본 모델은 _MODEL_STAGE2"
 
-    # dedup — 하위(자식) 프레임의 최신 봉 날짜가 last_trade_date 와 같으면 Gemini 호출 자체를 생략
+    # 하위 프레임 데이터가 부족하면(30봉 미만) 게이트와 무관하게 None — 데이터 부족 방어는 그대로 유지
     with patch("tools.llm_shadow._parent_permits", return_value=True), \
-         patch("tools.llm_shadow.is_notable", return_value=True), \
          patch("tools.llm_shadow.call_gemini") as mock_gemini:
-        same = judge_combo("005930", "daily", parent_bars_ok, "60m", child_bars_notable, "fake-key",
-                            last_trade_date=child_bars_notable[-1]["date"])
+        assert judge_combo("005930", "daily", parent_bars_ok, "60m", child_bars[:10], "fake-key") is None
+        mock_gemini.assert_not_called()
+
+    # dedup — 하위(자식) 프레임의 최신 봉 날짜가 last_trade_date 와 같으면 Gemini 호출 자체를 생략(그대로 유지)
+    with patch("tools.llm_shadow._parent_permits", return_value=True), \
+         patch("tools.llm_shadow.call_gemini") as mock_gemini:
+        same = judge_combo("005930", "daily", parent_bars_ok, "60m", child_bars, "fake-key",
+                            last_trade_date=child_bars[-1]["date"])
         assert same is None
         mock_gemini.assert_not_called()
 
     print("✅ test_llm_shadow: build_snapshot(히스토리)·is_notable·_parent_permits·build_prompt(CoT)·"
           "parse_judgment·call_gemini(재시도·model)·run_once·judge_from_bars·prompt_version·fetch_bars·"
-          "build_combo_prompt·judge_combo(게이트 2단계·dedup) 통과")
+          "build_combo_prompt·judge_combo(상위 게이트만+dedup, 하위 게이트 제거) 통과")
     return 0
 
 
