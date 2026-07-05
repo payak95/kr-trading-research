@@ -219,7 +219,17 @@ def main() -> int:
     validate(ch_spec)
     assert run(SpecStrategy(ch_spec, {"qty": 1}), bars, "CH", cash=10_000_000)["n_trades"] > 0, "채널 신고가 돌파 거래 발생"
 
-    print("✅ test_spec: eval_expr·decide·validate + SpecStrategy≡Strategy(매 틱·backtest.run 동일) + 셋업 백테스트 활성 + 새 지표(ema/roc/price/macd/bb/stoch) + 라이브 bars 활성화(B3) + screen extra_active·uses_flow_setups 통과")
+    # ── ATR%(정규화 변동성, OHLCV): 종목 스케일 무관 임계값으로 조건 빌더에서 쓸 수 있는지 ──
+    atrp_spec = {"version": 1, "name": "atrp",
+                 "indicators": [{"id": "px", "type": "price", "params": {}},
+                                {"id": "sma20", "type": "sma", "params": {"period": 20}},
+                                {"id": "av", "type": "atr_pct", "params": {"period": 14}}],
+                 "entry": {"all": [{"gt": ["px", "sma20"]}, {"gt": ["av", 0]}]},
+                 "exit": {"any": [{"lt": ["px", "sma20"]}]}}
+    validate(atrp_spec)
+    assert run(SpecStrategy(atrp_spec, {"qty": 1}), bars, "AV", cash=10_000_000)["n_trades"] > 0, "ATR% 필터 포함 거래 발생"
+
+    print("✅ test_spec: eval_expr·decide·validate + SpecStrategy≡Strategy(매 틱·backtest.run 동일) + 셋업 백테스트 활성 + 새 지표(ema/roc/price/macd/bb/stoch/atr_pct) + 라이브 bars 활성화(B3) + screen extra_active·uses_flow_setups 통과")
     return 0
 
 

@@ -93,6 +93,17 @@ def atr(bars: list[dict], period: int = 14) -> float | None:
     return sum(trs[-period:]) / period if len(trs) >= period else None
 
 
+def atr_pct(bars: list[dict], period: int = 14) -> float | None:
+    """ATR% = ATR / 최근 종가 × 100 — 원화 단위인 atr()은 종목마다 가격 스케일이 달라 조건 빌더에
+    고정 임계값(예: "ATR>500")을 못 만든다(삼성전자 vs 저가주). 정규화하면 종목 무관 임계값이 가능
+    (예: "ATR%<2%=저변동성", "ATR%>5%=고변동성"). 부족하거나 최근 종가<=0 이면 None."""
+    a = atr(bars, period)
+    if a is None or not bars:
+        return None
+    close = float(bars[-1].get("close") or 0)
+    return (a / close) * 100 if close > 0 else None
+
+
 def stochastic(bars: list[dict], k: int = 14, d: int = 3) -> dict | None:
     """스토캐스틱 %K/%D — %K=100·(종가-최저저)/(최고고-최저저), %D=%K 의 d 봉 SMA.
     입력 bars=[{high,low,close,...}]. 데이터 부족(k+d-1 미만)이면 None. 밴드폭 0 이면 %K=50.

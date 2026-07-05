@@ -5,7 +5,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from kr_research.trading.indicators import atr, bollinger, channel, ema, macd, price, roc, rsi, rvol, sma, stochastic
+from kr_research.trading.indicators import (
+    atr, atr_pct, bollinger, channel, ema, macd, price, roc, rsi, rvol, sma, stochastic,
+)
 
 
 def main() -> int:
@@ -73,7 +75,13 @@ def main() -> int:
     assert atr(ab, 14) == 2.0, "TR 평균=2"
     assert atr(ab[:3], 14) is None, "데이터 부족→None"
 
-    print("✅ test_indicators: SMA·RSI·EMA·ROC·현재가·MACD·볼린저·스토캐스틱·상대거래량·채널·ATR 통과")
+    # ATR% — 종목 가격 스케일 무관 정규화(ATR/최근종가×100)
+    assert abs(atr_pct(ab, 14) - (2.0 / 9 * 100)) < 1e-9, "ATR/종가×100"
+    assert atr_pct(ab[:3], 14) is None, "ATR 계산 불가→None"
+    zero_close = [{"high": 1, "low": -1, "close": 0} for _ in range(20)]
+    assert atr_pct(zero_close, 14) is None, "종가<=0 → None(방어)"
+
+    print("✅ test_indicators: SMA·RSI·EMA·ROC·현재가·MACD·볼린저·스토캐스틱·상대거래량·채널·ATR·ATR% 통과")
     return 0
 
 

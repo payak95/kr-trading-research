@@ -14,7 +14,9 @@
 """
 from kr_research.core.params import Params
 from kr_research.trading import flow, setups
-from kr_research.trading.indicators import atr, bollinger, channel, ema, macd, price, roc, rsi, rvol, sma, stochastic
+from kr_research.trading.indicators import (
+    atr, atr_pct, bollinger, channel, ema, macd, price, roc, rsi, rvol, sma, stochastic,
+)
 from kr_research.trading.strategy import Intent
 
 # 지표 메타 — fn + 파라미터 순서 + 다중 출력 이름(None=스칼라, dict=id.출력 키) + 입력(needs).
@@ -32,6 +34,7 @@ _IND = {
     "rvol":    {"fn": rvol,    "params": ["period"], "outputs": None, "needs": "bars"},
     "channel": {"fn": channel, "params": ["period"], "outputs": ["high", "low"], "needs": "bars"},
     "atr":     {"fn": atr,     "params": ["period"], "outputs": None, "needs": "bars"},
+    "atr_pct": {"fn": atr_pct, "params": ["period"], "outputs": None, "needs": "bars"},
 }
 _OPS = {
     "gt": lambda a, b: a > b, "lt": lambda a, b: a < b,
