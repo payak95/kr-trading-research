@@ -36,6 +36,12 @@ _HISTORY_LEN = 4  # 지표 히스토리 길이(오늘 포함 최근 4거래일) 
 _NOTABLE_RSI_LOW, _NOTABLE_RSI_HIGH = 30, 70
 _NOTABLE_RVOL_MIN = 2.0
 _NOTABLE_BOLLINGER_LOW, _NOTABLE_BOLLINGER_HIGH = 0.05, 0.95
+# ③ 콤보 관찰(상위 프레임 필터) 임계값 — 종가가 20일 이동평균 위이고(대세 하락 아님) RSI 가 극단적
+# 과매도(패닉)가 아니면 허가. AND 조건인 게 중요 — OR 이면 rsi>=20 은 거의 항상 참이라 사실상 항상
+# 허가되는 무의미한 게이트가 됨(첫 설계 때 리뷰에서 발견해 AND 로 수정).
+_PARENT_RSI_FLOOR = 20
+_COMBO_PROMPT_VERSION = "combo_v1"  # build_combo_prompt 문구가 바뀌면 올린다(단일 프레임 _PROMPT_VERSION 과
+                                    # 별개 네임스페이스 — 스키마 자체가 다름)
 
 
 def _bollinger_pct(closes: list[float]) -> float | None:
@@ -91,6 +97,16 @@ def is_notable(snapshot: dict) -> bool:
     return False
 
 
+def _parent_permits(snapshot: dict) -> bool:
+    """③ 콤보 관찰의 상위 프레임(필터) 게이트 — 대세가 하락 추세면 하위 프레임에서 아무리 좋은 신호가
+    나와도 진입을 원천 차단. close>=sma20(대세 하락 아님) AND rsi14 가 극단적 과매도(<20, 패닉)가 아님 —
+    반드시 AND(값이 없으면 판단 불가로 보수적으로 차단, False)."""
+    close, sma20, rsi = snapshot.get("close"), snapshot.get("sma20"), snapshot.get("rsi14")
+    if close is None or sma20 is None or rsi is None:
+        return False
+    return close >= sma20 and rsi >= _PARENT_RSI_FLOOR
+
+
 def build_prompt(code: str, snapshot: dict) -> str:
     payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
     return (
@@ -102,6 +118,34 @@ def build_prompt(code: str, snapshot: dict) -> str:
         "2) counter_argument: 지금 판단을 내리기 전에 반박할 만한 리스크나 서로 모순되는 지표가 있다면 "
         "한국어 한 문장(없으면 \"없음\")\n"
         "3) 위 분석을 바탕으로 매수/매도/보유 중 하나를 최종 결정\n\n"
+        '아래 JSON 형식으로만 답해(다른 텍스트 금지):\n'
+        '{"market_context_analysis":"...","counter_argument":"...","action":"buy|sell|hold",'
+        '"confidence":0.0~1.0,"reason":"한국어 한 문장"}'
+    )
+
+
+def build_combo_prompt(code: str, parent_label: str, parent_snapshot: dict,
+                       child_label: str, child_snapshot: dict) -> str:
+    """③ 콤보 관찰 전용 프롬프트 — 상위 프레임(대세 필터 통과분)과 하위 프레임(타점 트리거 통과분)
+    스냅샷을 함께 넘겨, 상위 추세를 거스르지 않는 선에서 하위 타이밍이 실제로 진입할 만한지 최종 판단
+    시킨다. CoT 스키마는 build_prompt 와 동일(market_context_analysis/counter_argument 선행)."""
+    parent_payload = json.dumps(parent_snapshot, ensure_ascii=False, separators=(",", ":"))
+    child_payload = json.dumps(child_snapshot, ensure_ascii=False, separators=(",", ":"))
+    return (
+        f"너는 한국 주식 단기 트레이더야. 종목코드 {code}의 상위 프레임({parent_label}, 대세 판단용)과 "
+        f"하위 프레임({child_label}, 타이밍 판단용) 지표 스냅샷(JSON, *_history 는 각 프레임 기준 최근 "
+        f"{_HISTORY_LEN}봉 추이)이야.\n"
+        f"상위 프레임({parent_label}): {parent_payload}\n"
+        f"하위 프레임({child_label}): {child_payload}\n\n"
+        "상위 프레임에서 이미 대세가 매수 우호적이라고 1차로 걸러졌고, 하위 프레임에서 구체적인 진입 "
+        "신호가 포착돼 여기까지 왔어. 다른 지식(뉴스·펀더멘털)은 쓰지 마. 결론을 바로 내지 말고 아래 "
+        "순서로 먼저 분석한 뒤 최종 판단해:\n"
+        "1) market_context_analysis: 상위 프레임의 대세와 하위 프레임의 타이밍이 서로 부합하는지 "
+        "한국어 한 문장\n"
+        "2) counter_argument: 지금 판단을 내리기 전에 반박할 만한 리스크나 두 프레임 간에 모순되는 "
+        "지표가 있다면 한국어 한 문장(없으면 \"없음\")\n"
+        "3) 위 분석을 바탕으로 상위 프레임의 대세를 거스르지 않는 선에서 매수/매도/보유 중 하나를 "
+        "최종 결정\n\n"
         '아래 JSON 형식으로만 답해(다른 텍스트 금지):\n'
         '{"market_context_analysis":"...","counter_argument":"...","action":"buy|sell|hold",'
         '"confidence":0.0~1.0,"reason":"한국어 한 문장"}'
@@ -205,18 +249,63 @@ def judge_from_bars(code: str, bars: list[dict], api_key: str, last_trade_date: 
     }
 
 
+def fetch_bars(code: str, timeframe: str = "daily", lookback_days: int = 120) -> list[dict]:
+    """일봉(기본, 네이버) 또는 분봉(timeframe="5m"/"15m"/"30m"/"60m"/"4h", tools/intraday_ohlcv.py) 조회 —
+    run_once·tools/ai_combo_scheduler.py 공유(양쪽이 상위·하위 프레임을 각각 조회할 때 재사용). 일봉만
+    lookback_days 를 쓰고, 분봉은 timeframe 별 고정 range(intraday_ohlcv._TF)라 이 인자를 무시한다."""
+    if timeframe == "daily":
+        return daily_ohlcv(code, count=lookback_days)
+    from tools.intraday_ohlcv import resolve_and_fetch
+    return resolve_and_fetch(code, timeframe)
+
+
 def run_once(code: str, lookback_days: int, api_key: str, last_trade_date: str | None = None,
              timeframe: str = "daily", model: str = _MODEL) -> dict | None:
-    """일봉(기본, 네이버) 또는 분봉(timeframe="5m"/"30m"/"60m", tools/intraday_ohlcv.py)을 실시간
-    조회한 뒤 judge_from_bars 로 판단 — 개별 종목 설정(ai_shadow_scheduler.py)용. 저장은 하지 않는다
+    """일봉(기본, 네이버) 또는 분봉(timeframe="5m"/"15m"/"30m"/"60m"/"4h", tools/intraday_ohlcv.py)을
+    실시간 조회한 뒤 judge_from_bars 로 판단 — 개별 종목 설정(ai_shadow_scheduler.py)용. 저장은 하지 않는다
     (호출부 책임). judge_from_bars 는 분봉이든 일봉이든 그대로(레코드의 date 필드가 12자/8자로 자연히
     구분되어 dedup·전진검증이 스키마 변경 없이 동작)."""
-    if timeframe == "daily":
-        bars = daily_ohlcv(code, count=lookback_days)
-    else:
-        from tools.intraday_ohlcv import resolve_and_fetch
-        bars = resolve_and_fetch(code, timeframe)
+    bars = fetch_bars(code, timeframe, lookback_days)
     return judge_from_bars(code, bars, api_key, last_trade_date, model)
+
+
+def judge_combo(code: str, parent_timeframe: str, parent_bars: list[dict], child_timeframe: str,
+                child_bars: list[dict], api_key: str, last_trade_date: str | None = None,
+                model: str = _MODEL_STAGE2) -> dict | None:
+    """③ 콤보 관찰 핵심 로직(tools/ai_combo_scheduler.py 전용) — 상위 프레임으로 대세 허가(_parent_permits)
+    를 먼저 확인하고, 통과했을 때만 하위 프레임의 로컬 트리거(is_notable)를 확인한다. 둘 다 통과해야만
+    Gemini 를 호출(build_combo_prompt) — 어느 한쪽이라도 막히면 Gemini 호출 없이 None(무료).
+
+    entry_price/trade_date 는 하위(자식) 프레임 기준으로 명시적으로 설정한다 — 중첩된 snapshot 딕셔너리엔
+    최상위 "close" 가 없어서 judge_from_bars 처럼 자동으로는 못 뽑는다. 이래야 ai_forward_eval.py 가
+    코드 변경 없이 그대로 D+N 평가에 재사용 가능(trade_date 로 dedup·forward_returns 계산에 씀).
+
+    last_trade_date 는 하위 프레임의 최신 봉 날짜와 비교 — 상위 프레임은 느리게 바뀌므로 "새 타점이
+    왔는가"가 재판단 여부의 실질적 기준."""
+    parent_snapshot = build_snapshot(parent_bars)
+    if parent_snapshot is None or not _parent_permits(parent_snapshot):
+        return None
+    child_snapshot = build_snapshot(child_bars)
+    if child_snapshot is None or not is_notable(child_snapshot):
+        return None
+    trade_date = child_bars[-1]["date"]
+    if last_trade_date is not None and trade_date == last_trade_date:
+        return None
+    judgment = call_gemini(
+        build_combo_prompt(code, parent_timeframe, parent_snapshot, child_timeframe, child_snapshot),
+        api_key, model)
+    if judgment is None:
+        return None
+    return {
+        "ts": datetime.now(_KST).isoformat(),
+        "code": code,
+        "trade_date": trade_date,
+        "entry_price": child_snapshot["close"],
+        "snapshot": {"parent": parent_snapshot, "child": child_snapshot,
+                     "_prompt_version": _COMBO_PROMPT_VERSION},
+        "model": model,
+        **judgment,
+    }
 
 
 def main() -> int:

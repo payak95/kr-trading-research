@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kr_research.core.ai_store import AiStore
 from tools.ai_shadow_scheduler import publish_ai_view
+from tools.ai_combo_scheduler import publish_combo_view
 from tools.naver_ohlcv import daily_ohlcv
 from kr_research.trading.tracking import BENCHMARK_CODE, HORIZONS, benchmark_returns, forward_returns
 
@@ -65,6 +66,8 @@ def main() -> int:
     import redis
     r = redis.from_url(redis_url, decode_responses=True)
     publish_ai_view(r, store)
+    publish_combo_view(r, store)  # ③ 콤보 관찰 판단도 config_name 무관하게 run_eval() 이 함께 평가하므로,
+                                  # 평가 직후 즉시 반영되도록 같이 재발행(안 하면 다음 콤보 스케줄러 tick 까지 지연)
     print(f"[ai_forward_eval] open={open_before} 평가={evaluated} → publish 완료")
     store.close()
     return 0
