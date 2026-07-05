@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kr_research.core.ai_store import UNIVERSE_CONFIG_NAME, AiStore
 from tools.backtest_worker import DEFAULT_DAYS, UNIVERSE_KEY, _cache_only_fetch
-from tools.llm_shadow import judge_from_bars, log_judgment
+from tools.llm_shadow import _MODEL_PRO, build_snapshot, is_notable, judge_from_bars, log_judgment
 from kr_research.trading.tracking import HORIZONS, summarize_actions, summarize_by_confidence
 
 _KST = timezone(timedelta(hours=9))
@@ -27,17 +27,29 @@ PUBLISH_LIMIT = 300
 
 
 def scan_universe(r, store: AiStore, codes: list[str], api_key: str) -> dict:
-    """유니버스 전체를 1회 스캔 — 캐시 콜드미스는 skip. 반환 {judged,skipped,shortlist}(테스트/로그용)."""
+    """유니버스 전체를 1회 스캔 — 캐시 콜드미스는 skip. 지표만으로 특이점 없는 종목(is_notable=False)은
+    Gemini 호출 자체를 생략(파이썬 규칙 기반 사전 필터, API 비용 0)하고, 통과한 소수만 정밀 모델(_MODEL_PRO)
+    로 판단시킨다 — 300종목 전부를 매번 정밀 모델로 돌리면 비용만 늘고, 대부분은 어차피 hold로 끝나는
+    "심심한 날"이라 굳이 비싼 모델로 다시 볼 필요가 없다는 판단.
+    반환 {judged,skipped,filtered,shortlist}(테스트/로그용)."""
     fetch = _cache_only_fetch(r)
-    judged, skipped, shortlist = 0, 0, []
+    judged, skipped, filtered, shortlist = 0, 0, 0, []
     for code in codes:
         bars = fetch(code, DEFAULT_DAYS)
         if not bars:
             skipped += 1
             continue
+        snapshot = build_snapshot(bars)
+        if snapshot is None:
+            skipped += 1
+            continue
+        if not is_notable(snapshot):
+            filtered += 1
+            continue
         try:
             record = judge_from_bars(code, bars, api_key,
-                                      last_trade_date=store.last_trade_date(UNIVERSE_CONFIG_NAME, code))
+                                      last_trade_date=store.last_trade_date(UNIVERSE_CONFIG_NAME, code),
+                                      model=_MODEL_PRO)
         except Exception as e:
             print(f"[ai_universe_scan] {code} 실패: {e}")
             continue
@@ -48,7 +60,7 @@ def scan_universe(r, store: AiStore, codes: list[str], api_key: str) -> dict:
         judged += 1
         if record["action"] == "buy":
             shortlist.append(code)
-    return {"judged": judged, "skipped": skipped, "shortlist": shortlist}
+    return {"judged": judged, "skipped": skipped, "filtered": filtered, "shortlist": shortlist}
 
 
 def publish_universe_view(r, store: AiStore, shortlist: list[str]) -> None:
@@ -86,7 +98,8 @@ def main() -> int:
     finally:
         store.close()
     print(f"[ai_universe_scan] 유니버스={len(codes)} 판단={result['judged']} "
-          f"스킵(캐시미스/중복)={result['skipped']} 매수후보={len(result['shortlist'])}")
+          f"스킵(캐시미스/중복)={result['skipped']} 사전필터제외={result['filtered']} "
+          f"매수후보={len(result['shortlist'])}")
     return 0
 
 

@@ -16,7 +16,9 @@ def main() -> int:
 
         rec = {"code": "005930", "trade_date": "20260701", "action": "buy",
                "confidence": 0.7, "reason": "상승 추세", "entry_price": 70000,
-               "snapshot": {"close": 70000, "rsi14": 55.0}}
+               "snapshot": {"close": 70000, "rsi14": 55.0},
+               "market_context_analysis": "상승 추세 우세", "counter_argument": "거래량 부족",
+               "model": "gemini-flash-lite-latest"}
 
         # 멱등: 같은 (config_name, code, signaled_at) 재기록은 무시
         with patch("kr_research.core.ai_store.time.time", return_value=1000.0):
@@ -24,6 +26,9 @@ def main() -> int:
             s.record_judgment("cfg1", {**rec, "action": "sell"})  # 같은 signaled_at → 무시돼야
         rows = s.get_judgments()
         assert len(rows) == 1 and rows[0]["action"] == "buy", "멱등: 첫 기록 유지"
+        assert rows[0]["market_context_analysis"] == "상승 추세 우세"
+        assert rows[0]["counter_argument"] == "거래량 부족"
+        assert rows[0]["model"] == "gemini-flash-lite-latest"
 
         # config 가 다르면 별개 레코드(같은 signaled_at 이어도 UNIQUE 키가 다름)
         with patch("kr_research.core.ai_store.time.time", return_value=1000.0):
@@ -114,8 +119,8 @@ def main() -> int:
 
         s.close()  # Windows: 임시 디렉터리 삭제 전 연결 닫기(core/store.py 테스트와 동일 관례)
 
-    print("✅ test_ai_store: 멱등 기록·미평가 조회·수익 갱신·config_name 필터·last_trade_date·"
-          "decide_virtual_trade(반복매수무시·전량청산·고가주최소1주)·가상포지션원장 통과")
+    print("✅ test_ai_store: 멱등 기록(CoT 필드·model 포함)·미평가 조회·수익 갱신·config_name 필터·"
+          "last_trade_date·decide_virtual_trade(반복매수무시·전량청산·고가주최소1주)·가상포지션원장 통과")
     return 0
 
 
