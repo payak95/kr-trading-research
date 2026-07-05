@@ -44,13 +44,21 @@ def publish_ai_view(r, store: AiStore) -> None:
     """콘솔 '개별 종목 관찰' 뷰(bot:ai:judgments/summary/positions) 재발행 — 스케줄러 배치 뒤·전진검증
     (ai_forward_eval.py) 뒤 공용. 유니버스 스캔(UNIVERSE_CONFIG_NAME, tools/ai_universe_scan.py 가
     별도 발행)은 제외 — 두 화면이 섞이지 않게. LIMIT 을 걸기 전에 먼저 걸러야 한다(안 그러면 유니버스
-    스캔 300건이 최신순 상위를 차지해 개별 종목 판단이 밀려날 수 있음)."""
-    rows = [row for row in store.get_judgments(None) if row["config_name"] != UNIVERSE_CONFIG_NAME]
+    스캔 300건이 최신순 상위를 차지해 개별 종목 판단이 밀려날 수 있음).
+
+    콘솔에서 삭제된 설정(bot:ai_configs 에 더 이상 없는 config_name)의 과거 판단·포지션도 같이 제외한다 —
+    콘솔은 Redis 만 쓰고 이 SQLite(source of truth)엔 접근할 수 없어 삭제 자체는 못 하니, 재발행할 때마다
+    "지금 살아있는 설정"으로 뷰만 다시 걸러낸다(원본 이력은 SQLite 에 그대로 남아 감사 목적은 유지 —
+    비활성화(enabled=false)만 된 설정은 살아있는 걸로 치므로 안 걸러짐, 완전 삭제된 것만 제외)."""
+    active = set(r.hgetall(K_CONFIGS).keys())
+    rows = [row for row in store.get_judgments(None)
+            if row["config_name"] != UNIVERSE_CONFIG_NAME and row["config_name"] in active]
     summary = summarize_actions(rows, HORIZONS)
     summary["by_confidence"] = summarize_by_confidence(rows, HORIZONS)["by_mode"]
     r.set(K_JUDGMENTS, json.dumps(rows[:PUBLISH_LIMIT], ensure_ascii=False))
     r.set(K_SUMMARY, json.dumps(summary, ensure_ascii=False))
-    positions = [row for row in store.get_positions() if row["config_name"] != UNIVERSE_CONFIG_NAME]
+    positions = [row for row in store.get_positions()
+                 if row["config_name"] != UNIVERSE_CONFIG_NAME and row["config_name"] in active]
     r.set(K_POSITIONS, json.dumps(positions[:PUBLISH_LIMIT], ensure_ascii=False))
 
 

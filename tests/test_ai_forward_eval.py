@@ -1,5 +1,6 @@
 # AI 섀도 판단 전진검증 — forward_returns/benchmark_returns 연계·부분 갱신·발행 검증(네트워크는 mock)
 """실행: python tests/test_ai_forward_eval.py"""
+import json
 import os
 import sys
 import tempfile
@@ -46,10 +47,14 @@ def main() -> int:
             evaluated2 = ev.run_eval(store)
         assert evaluated2 == 0, "이미 다 채워진 판단은 재평가 대상에서 빠짐"
 
-        # publish_ai_view 배선 확인(스케줄러와 공용 함수) — bot:ai:judgments/summary 채워짐
+        # publish_ai_view 배선 확인(스케줄러와 공용 함수) — bot:ai:judgments/summary 채워짐.
+        # bot:ai_configs 에 cfg1 을 등록해둬야 함(콘솔에서 삭제된 설정은 뷰에서 제외하는 필터가 있어
+        # 등록 안 하면 rows 가 조용히 빈 리스트가 돼서 r.exists() 만으론 이 필터 버그를 못 잡음).
         r = FakeRedis(decode_responses=True)
+        r.hset(sched.K_CONFIGS, "cfg1", "{}")
         sched.publish_ai_view(r, store)
         assert r.exists(sched.K_JUDGMENTS) and r.exists(sched.K_SUMMARY)
+        assert len(json.loads(r.get(sched.K_JUDGMENTS))) == 1, "bot:ai_configs 에 있는 설정의 판단은 뷰에 남아야 함"
 
         # 분봉 판단(trade_date 12자 YYYYMMDDHHMM) — [:8]로 캘린더 날짜만 취해 일봉 D+N 평가에 재사용돼야 함
         with patch("kr_research.core.ai_store.time.time", return_value=2000.0):

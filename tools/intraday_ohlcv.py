@@ -22,7 +22,9 @@ import requests
 _KST = timezone(timedelta(hours=9))
 _URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-_TF = {"5m": ("5m", "5d"), "30m": ("30m", "1mo"), "60m": ("60m", "3mo")}  # 지표 워밍업(sma60)에 충분한 봉 확보
+_TF = {"5m": ("5m", "5d"), "15m": ("15m", "5d"), "30m": ("30m", "1mo"), "60m": ("60m", "3mo"), "4h": ("4h", "3mo")}
+# 지표 워밍업(sma60)에 충분한 봉 확보 — range 는 실측 확인(15m/5d≈121봉, 4h/3mo≈123봉, 전부 60 이상).
+# Yahoo v8 interval 유효값 확인됨: 1m,2m,5m,15m,30m,60m,90m,1h,4h,1d,5d,1wk,1mo,3mo("240m" 등은 무효).
 _ATTEMPTS = 3  # 일시 오류(429/403/5xx) 재시도 횟수 — tools/llm_shadow.call_gemini 와 동일 사내 패턴
 _SUFFIX_CACHE: dict[str, str] = {}
 

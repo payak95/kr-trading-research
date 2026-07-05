@@ -135,9 +135,20 @@ def main() -> int:
         summary2 = json.loads(r.get(sched.K_SUMMARY))
         assert summary2["by_mode"]["sell"]["signals"] == sell_before, "유니버스 스캔의 sell 이 개별 종목 집계에 안 섞여야 함"
 
+        # 콘솔에서 설정 삭제(bot:ai_configs 에서 HDEL) — 그 설정의 판단·포지션은 재발행 시 뷰에서 제외돼야
+        # 함(오너 리포트: "삭제해도 판단 이력 성과 패널에 계속 나온다"). SQLite 원본은 안 지우고 필터만 거는
+        # 방식이라, 삭제 이후에도 store 에서 직접 조회하면 이력은 그대로 남아있어야 한다(감사 목적 보존).
+        r.hdel(sched.K_CONFIGS, "on_due")
+        sched.publish_ai_view(r, store)
+        published3 = json.loads(r.get(sched.K_JUDGMENTS))
+        assert all(row["config_name"] != "on_due" for row in published3), "삭제된 설정의 판단은 뷰에서 빠져야 함"
+        positions3 = json.loads(r.get(sched.K_POSITIONS))
+        assert all(row["config_name"] != "on_due" for row in positions3), "삭제된 설정의 포지션도 뷰에서 빠져야 함"
+        assert len(store.get_judgments(config_name="on_due")) > 0, "SQLite 원본 이력 자체는 삭제하지 않고 보존"
+
         store.close()
 
-    print("✅ test_ai_shadow_scheduler: due 판정·에러 격리·상태기록·발행·유니버스 스캔 제외·"
+    print("✅ test_ai_shadow_scheduler: due 판정·에러 격리·상태기록·발행·유니버스 스캔 제외·삭제된 설정 뷰 필터·"
           "가상 포지션(오픈·반복매수무시·청산+실현손익) 통과")
     return 0
 
