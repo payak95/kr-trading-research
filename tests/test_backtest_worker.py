@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from tools.backtest_worker import (BENCH_CODE, MAX_DAYS, QUEUE_KEY, RESULT_KEY, _benchmark_return,
                                    backtest_spec, batch_spec, drain, process_job, screen_spec, serve,
-                                   sweep_spec)
+                                   sweep_spec, walkforward_spec)
 from kr_research.trading.spec import BASELINE_SPEC
 
 # 추세 스펙(지표만) — 강한 상승=sma_fast>sma_slow=후보, 하락=비후보(셋업 무관·결정적)
@@ -161,6 +161,26 @@ def main() -> int:
     no_grid = process_job({"job_id": "w2", "type": "sweep", "spec": BASELINE_SPEC, "code": "005930", "grid": {}}, fetch)
     assert no_grid["status"] == "error", "grid 누락 → 에러"
 
+    # ── walkforward_spec: 학습창 그리드서치→검증창 아웃오브샘플 롤링(test_days 폭으로 전진,
+    # 80봉·train=30·test=10 → start=0,10,...,40 = 5창) ──
+    wf = walkforward_spec(bars, "005930", BASELINE_SPEC, {"rsi_buy": [30, 40, 50]}, train_days=30, test_days=10,
+                         base_params=params)
+    assert wf["n_windows"] == 5 and len(wf["windows"]) == 5, f"창 5개 예상: {wf['n_windows']}"
+    assert set(wf["windows"][0]) >= {"train_start", "train_end", "test_start", "test_end", "params",
+                                     "out_of_sample_return_pct", "n_trades", "final_equity"}
+    # 창 하나도 못 채우면(창 길이가 데이터보다 김) n_windows=0, 크래시 없음
+    empty_wf = walkforward_spec(bars, "005930", BASELINE_SPEC, {"rsi_buy": [30, 40]}, train_days=100, test_days=50)
+    assert empty_wf["n_windows"] == 0
+
+    # ── process_job: walkforward 분기 + 에러(grid 누락) ──
+    wfj = process_job({"job_id": "w3", "type": "walkforward", "spec": BASELINE_SPEC, "code": "005930",
+                       "days": 90, "params": params, "grid": {"rsi_buy": [30, 40]},
+                       "train_days": 30, "test_days": 10}, fetch)
+    assert wfj["status"] == "done" and wfj["type"] == "walkforward" and wfj["result"]["n_windows"] == 5
+    wf_no_grid = process_job({"job_id": "w4", "type": "walkforward", "spec": BASELINE_SPEC, "code": "005930",
+                              "grid": {}, "train_days": 30, "test_days": 10}, fetch)
+    assert wf_no_grid["status"] == "error", "grid 누락 → 에러"
+
     # ── screen: 한 종목 fetch 실패(레이트리밋 등)는 skip, 잡은 done(전체 보호) ──
     def fetch_err(code, days):
         if code == "BAD":
@@ -298,7 +318,7 @@ def main() -> int:
     nout = json.loads(fru4.get(RESULT_KEY.format("f3")))
     assert nout["status"] == "done", "flow 미참조 스펙은 정상 처리(호출 없이)"
 
-    print("✅ test_backtest_worker: compute·process_job(backtest/screen/batch/sweep/종목격리)·screen_spec(flow 포함)·_cached_fetch·universe·flow_by_code(캐시·라이브·미참조skip)·drain·serve(데몬) 통과")
+    print("✅ test_backtest_worker: compute·process_job(backtest/screen/batch/sweep/walkforward/종목격리)·screen_spec(flow 포함)·_cached_fetch·universe·flow_by_code(캐시·라이브·미참조skip)·drain·serve(데몬) 통과")
     return 0
 
 

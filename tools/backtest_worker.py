@@ -30,6 +30,7 @@ from kr_research.trading.backtest import run
 from kr_research.trading.metrics import summary
 from kr_research.trading.spec import SpecStrategy, screen, uses_flow_setups, validate
 from kr_research.trading.tuning import grid_search
+from kr_research.trading.walkforward import walk_forward
 
 # 거래비용 근사값 — tools/backtest.py 와 동일 가정(드리프트 시 양쪽 함께 조정).
 FEE_RATE = 0.00015   # 편도 위탁수수료
@@ -49,6 +50,7 @@ DEFAULT_CASH = 10_000_000
 MAX_CODES = 30                             # 스크리닝 1잡당 종목 상한(다종목 호출 방어)
 MAX_UNIVERSE_CODES = 500                    # 유니버스 스크리닝 상한(캐시 전용 — 크게 허용)
 MAX_SWEEP_COMBOS = 500                      # 파라미터 튜닝 1잡당 조합 상한(캐시·순수계산이라 빠르나 페이로드/시간 보호)
+MIN_WF_WINDOW, MAX_WF_WINDOW = 5, 200       # 워크포워드 train/test 창 길이(거래일) clamp
 UNIVERSE_KEY = "bot:screen:universe"        # Redis Set — 야간 크론이 시총·거래대금 상위 N 으로 교체하는 유니버스(종목코드)
 BENCH_CODE = "069500"                       # 코스피 벤치마크 프록시 = KODEX 200 ETF(일반 종목처럼 일봉 fetch 가능)
 
@@ -140,6 +142,24 @@ def sweep_spec(bars: list[dict], code: str, spec: dict, grid: dict, base_params:
                        fee_rate=FEE_RATE, tax_rate=TAX_RATE, slippage=SLIPPAGE)
 
 
+def walkforward_spec(bars: list[dict], code: str, spec: dict, grid: dict, train_days: int, test_days: int,
+                     base_params: dict | None = None, metric: str = "return_pct",
+                     cap: int = MAX_SWEEP_COMBOS, cash: int = DEFAULT_CASH) -> dict:
+    """워크포워드(학습창 그리드서치→검증창 아웃오브샘플 평가, 롤링) — 얇은 래퍼(순수 로직은
+    trading.walkforward.walk_forward, 그리드서치와 동일 비용가정 공유)."""
+    return walk_forward(bars, code, spec, grid, train_days, test_days, base_params=base_params,
+                        metric=metric, cash=cash, fee_rate=FEE_RATE, tax_rate=TAX_RATE,
+                        slippage=SLIPPAGE, cap=cap)
+
+
+def _clamp_window(v, default: int) -> int:
+    try:
+        d = int(v)
+    except (TypeError, ValueError):
+        return default
+    return max(MIN_WF_WINDOW, min(MAX_WF_WINDOW, d))
+
+
 def _benchmark_return(bench_bars: list[dict], first_date, last_date) -> float | None:
     """벤치마크(코스피 ETF) 매수후보유 수익률(%) — 백테스트와 같은 [first,last] 날짜 구간으로 정렬.
     구간 내 봉이 2개 미만이면 None(정렬 불가 → 알파 생략)."""
@@ -215,6 +235,20 @@ def process_job(job: dict, fetch_bars) -> dict:
                 raise ValueError(f"일봉 0건 — 종목코드/기간 확인({code})")
             result = sweep_spec(bars, code, spec, grid, job.get("params"),
                                 job.get("metric", "return_pct"), cash=int(job.get("cash", DEFAULT_CASH)))
+        elif jtype == "walkforward":
+            code = str(job.get("code", "")).strip()
+            if not code:
+                raise ValueError("code 필수")
+            grid = {k: v for k, v in (job.get("grid") or {}).items() if isinstance(v, list) and v}
+            if not grid:
+                raise ValueError("grid(튜닝 값 목록) 필수")
+            train_days = _clamp_window(job.get("train_days"), 60)
+            test_days = _clamp_window(job.get("test_days"), 20)
+            bars = fetch_bars(code, days)
+            if not bars:
+                raise ValueError(f"일봉 0건 — 종목코드/기간 확인({code})")
+            result = walkforward_spec(bars, code, spec, grid, train_days, test_days, job.get("params"),
+                                      job.get("metric", "return_pct"), cash=int(job.get("cash", DEFAULT_CASH)))
         else:
             code = str(job.get("code", "")).strip()
             if not code:
