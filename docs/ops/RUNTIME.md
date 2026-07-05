@@ -17,6 +17,7 @@ kr-trading-research python tools/<script>` 형태(UTC):
 | `15 7 * * *` | `monitor.py --heartbeat` | 일일 점검 요약 |
 | `30 8 * * 1-5` | `pipeline_schedule.py` | 저장 전략 전부 파이프라인 큐 적재(유니버스 워밍 30분 뒤) |
 | `*/5 * * * *` | `ai_shadow_scheduler.py` | AI 섀도 판단 ②타겟 종목 관찰(콘솔 "AI 테스트" 탭, due 한 것만·무주문) |
+| `2-59/5 * * * *` | `ai_shadow_notify.py` | AI 섀도 판단 중 확신도≥0.7 buy/sell 신규분만 텔레그램 알림(scheduler 2분 뒤, de-noise) |
 | `10 7 * * *` | `ai_forward_eval.py` | AI 섀도 판단(①②) 전진검증(장 마감 후, 네이버 일봉) |
 | `10 8 * * 1-5` | `ai_universe_scan.py` | AI 섀도 판단 ①유니버스 스크리닝(유니버스 워밍 10분 뒤, 캐시만 읽음) |
 | `0 8 * * 1-5` | `screen_universe.py` | 시총풀→거래대금 상위 유니버스 확정 + 일봉 워밍 |
