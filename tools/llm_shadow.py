@@ -19,6 +19,8 @@ from kr_research.trading import indicators as ind
 
 _KST = timezone(timedelta(hours=9))
 _MODEL = "gemini-flash-lite-latest"  # telegram-market-bot 과 동일(저비용) 모델로 통일
+_PROMPT_VERSION = "v1"  # build_prompt() 문구가 바뀌면 올린다 — 저장 레코드에 심어 전진검증 통계가 프롬프트
+                        # 버전 간에 섞이지 않게 구분 가능(과거 레코드엔 소급 불가하니 지금부터 기록)
 _STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state", "shadow_judgments.jsonl")
 _MAX_REDIS_RECORDS = 199  # LTRIM 0 199 — 최근 200건 보관(다른 status:logs 는 50, 판단 리뷰용이라 더 길게)
 _ATTEMPTS = 3  # call_gemini 일시 오류(429/5xx) 재시도 횟수 — telegram-market-bot/tools/summarize.py 와 동일 패턴
@@ -133,7 +135,7 @@ def judge_from_bars(code: str, bars: list[dict], api_key: str, last_trade_date: 
         "code": code,
         "trade_date": trade_date,
         "entry_price": snapshot["close"],
-        "snapshot": snapshot,
+        "snapshot": {**snapshot, "_prompt_version": _PROMPT_VERSION},  # 저장용에만 태깅(Gemini 프롬프트엔 안 보냄)
         **judgment,
     }
 

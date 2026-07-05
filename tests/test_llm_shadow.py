@@ -6,7 +6,9 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from tools.llm_shadow import build_prompt, build_snapshot, call_gemini, judge_from_bars, parse_judgment, run_once
+from tools.llm_shadow import (
+    _PROMPT_VERSION, build_prompt, build_snapshot, call_gemini, judge_from_bars, parse_judgment, run_once,
+)
 
 _BARS = [{"close": 50000 + i * 100, "high": 50200 + i * 100, "low": 49800 + i * 100, "volume": 100000}
          for i in range(70)]
@@ -86,7 +88,15 @@ def main() -> int:
         assert judge_from_bars("005930", fake_bars, "fake-key", last_trade_date=fake_bars[-1]["date"]) is None
         assert mock_gemini.call_count == 1, "dedup 스킵 시 Gemini 재호출 없어야 함"
 
-    print("✅ test_llm_shadow: build_snapshot·build_prompt·parse_judgment·call_gemini(재시도)·run_once·judge_from_bars 통과")
+    # prompt_version — 저장용 snapshot 에만 태깅되고, Gemini 에 보내는 프롬프트엔 안 섞여야 함
+    with patch("tools.llm_shadow.call_gemini", return_value={"action": "hold", "confidence": 0.5, "reason": "z"}) as mock_gemini:
+        rec = judge_from_bars("005930", fake_bars, api_key="fake-key")
+        assert rec["snapshot"]["_prompt_version"] == _PROMPT_VERSION
+        prompt_arg = mock_gemini.call_args[0][0]
+        assert "_prompt_version" not in prompt_arg, "버전 태그가 Gemini 프롬프트에 섞이면 안 됨"
+
+    print("✅ test_llm_shadow: build_snapshot·build_prompt·parse_judgment·call_gemini(재시도)·run_once·"
+          "judge_from_bars·prompt_version 통과")
     return 0
 
 
