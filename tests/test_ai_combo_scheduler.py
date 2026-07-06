@@ -21,7 +21,39 @@ def _rec(action="buy"):
             "snapshot": {"parent": {"close": 70000}, "child": {"close": 70000}}}
 
 
+def _test_force_run() -> None:
+    """K_FORCE_RUN(콤보 전용 키) — ②와 동일한 강제 실행 메커니즘(2026-07 오너 요청). _due()가 False 여도
+    1회 실행되고, 실행 후엔 HDEL 로 원자적으로 소비되어 재실행되지 않아야 한다. _due() 를 명시적으로
+    False 로 고정해 "정말 강제가 아니면 절대 안 도는" 상황에서도 강제 플래그만으로 실행됨을 증명한다."""
+    r = FakeRedis(decode_responses=True)
+    with patch("tools.ai_combo_scheduler._due", return_value=False), \
+         tempfile.TemporaryDirectory() as d:
+        store = AiStore(db_path=os.path.join(d, "t.db"))
+        r.hset(combo.K_CONFIGS, "new_combo", json.dumps(
+            {"symbol": "005930", "parent_timeframe": "daily", "child_timeframe": "60m",
+             "interval_min": 60, "enabled": True}))
+        r.hset(combo.K_FORCE_RUN, "new_combo", "1")
+
+        with patch("tools.ai_combo_scheduler.fetch_bars", return_value=[{"date": "x"}]), \
+             patch("tools.ai_combo_scheduler.judge_combo", return_value=_rec()), \
+             patch("tools.ai_combo_scheduler.log_judgment"):
+            recorded = combo.run_combo_scheduler(r, store, api_key="fake-key")
+        assert recorded == 1, "_due()=False 여도 강제 실행 플래그가 있으면 1회 처리돼야 함"
+        assert not r.hexists(combo.K_FORCE_RUN, "new_combo"), "실행 후엔 플래그가 소비돼 사라져야 함"
+
+        with patch("tools.ai_combo_scheduler.fetch_bars", return_value=[{"date": "x"}]), \
+             patch("tools.ai_combo_scheduler.judge_combo", return_value=_rec()) as mock_judge2, \
+             patch("tools.ai_combo_scheduler.log_judgment"):
+            recorded2 = combo.run_combo_scheduler(r, store, api_key="fake-key")
+        assert recorded2 == 0, "플래그 소비 후 _due()=False 면 재실행되지 않아야 함"
+        mock_judge2.assert_not_called()
+
+        store.close()
+
+
 def main() -> int:
+    _test_force_run()
+
     r = FakeRedis(decode_responses=True)
     # _due() 자체(장 상태 게이트)는 test_ai_shadow_scheduler.py 에서 이미 검증됨 — 여기선 run_combo_scheduler
     # 가 그 함수를 하위(자식) 타임프레임으로 올바르게 배선해서 호출하는지만 확인(장상태·요일 무관하게 고정).
@@ -129,8 +161,8 @@ def main() -> int:
 
         store.close()
 
-    print("✅ test_ai_combo_scheduler: due 재사용 배선·dedup 연계·에러격리·상태기록·발행(프리픽스 벗기기)·"
-          "교차뷰격리·삭제필터·가상포지션(오픈·청산) 통과")
+    print("✅ test_ai_combo_scheduler: due 재사용 배선·강제 실행(K_FORCE_RUN)·dedup 연계·에러격리·상태기록·"
+          "발행(프리픽스 벗기기)·교차뷰격리·삭제필터·가상포지션(오픈·청산) 통과")
     return 0
 
 

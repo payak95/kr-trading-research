@@ -68,8 +68,39 @@ def _test_due_market_gate() -> None:
         assert not _due(minute_cfg, time.time() - 1801), "장외(야간·주말·공휴일)면 False(Yahoo 호출 생략)"
 
 
+def _test_force_run() -> None:
+    """K_FORCE_RUN — 콘솔이 신규 설정 등록 직후 세팅하는 강제 실행 플래그(2026-07 오너 요청: 등록하면
+    바로 한 번 실행되어 설정이 동작하는지 확인시켜줌). due 가 아니어도(정렬 안 된 분·경과 미충족 등)
+    1회 실행되고, 실행 후엔 HDEL 로 원자적으로 소비되어 다음 tick 부터는 다시 정상 게이트를 따라야 한다."""
+    r = FakeRedis(decode_responses=True)
+    with patch("tools.ai_shadow_scheduler.is_trading_day", return_value=True), \
+         patch("tools.ai_shadow_scheduler.is_market_open", return_value=True), \
+         tempfile.TemporaryDirectory() as d:
+        store = AiStore(db_path=os.path.join(d, "t.db"))
+        r.hset(sched.K_CONFIGS, "new_cfg", json.dumps(
+            {"symbol": "005930", "lookback_days": 120, "interval_min": 60, "enabled": True}))
+        r.hset(sched.K_LAST_RUN, "new_cfg", 9_999_999_999)  # 방금 등록 직후 상태를 재현(정상 게이트로는 not-due)
+        r.hset(sched.K_FORCE_RUN, "new_cfg", "1")
+
+        with patch("tools.ai_shadow_scheduler.run_once", return_value=_rec()), \
+             patch("tools.ai_shadow_scheduler.log_judgment"):
+            recorded = sched.run_scheduler(r, store, api_key="fake-key")
+        assert recorded == 1, "정상 게이트로는 due 아니어도 강제 실행 플래그가 있으면 1회 처리돼야 함"
+        assert not r.hexists(sched.K_FORCE_RUN, "new_cfg"), "실행 후엔 플래그가 소비돼 사라져야 함"
+
+        # 플래그 소비 후 재실행 — 방금 처리돼 last_run 이 갱신됐으니(interval_min=60) 자연히 due 아님
+        with patch("tools.ai_shadow_scheduler.run_once", return_value=_rec()) as mock_run2, \
+             patch("tools.ai_shadow_scheduler.log_judgment"):
+            recorded2 = sched.run_scheduler(r, store, api_key="fake-key")
+        assert recorded2 == 0, "플래그 소비 후엔 다시 정상 게이트를 따라 재실행되지 않아야 함"
+        mock_run2.assert_not_called()
+
+        store.close()
+
+
 def main() -> int:
     _test_due_market_gate()
+    _test_force_run()
 
     r = FakeRedis(decode_responses=True)
     # 아래 회귀 테스트들은 due 판정 자체가 아니라 스케줄러의 다른 동작(dedup·에러 격리·발행 등)을 검증하는
@@ -174,8 +205,8 @@ def main() -> int:
 
         store.close()
 
-    print("✅ test_ai_shadow_scheduler: due 판정·에러 격리·상태기록·발행·유니버스 스캔 제외·삭제된 설정 뷰 필터·"
-          "가상 포지션(오픈·반복매수무시·청산+실현손익) 통과")
+    print("✅ test_ai_shadow_scheduler: due 판정(30/60분 정렬)·강제 실행(K_FORCE_RUN)·에러 격리·상태기록·발행·"
+          "유니버스 스캔 제외·삭제된 설정 뷰 필터·가상 포지션(오픈·반복매수무시·청산+실현손익) 통과")
     return 0
 
 
