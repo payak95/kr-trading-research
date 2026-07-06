@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import time
+from datetime import datetime
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -23,22 +24,47 @@ def _rec(action="buy"):
 
 
 def _test_due_market_gate() -> None:
-    """_due() — 주기 경과 + 장 상태 게이트(휴장일·야간에 Naver/Yahoo 호출 자체를 생략해 차단 위험을 줄임)."""
+    """_due() — 주기 경과 + 정렬된 분(30/60분 주기만) + 장 상태 게이트(휴장일·야간에 Naver/Yahoo 호출
+    자체를 생략해 차단 위험을 줄임). interval_min 60/30 은 현재 KST 분을 함께 봐서 wall-clock 에
+    의존하는 flaky 테스트가 되므로, datetime.now(KST) 를 고정해 결정론적으로 검증한다."""
     daily_cfg = {"timeframe": "daily", "interval_min": 60}
     minute_cfg = {"timeframe": "30m", "interval_min": 30}
+    fast_cfg = {"timeframe": "5m", "interval_min": 5}  # 정렬 대상 아님(30/60 이 아니므로 분 무관)
+
+    aligned_15 = datetime(2026, 7, 6, 10, 15)   # 60분 주기 정렬 분(hh:15)
+    aligned_45 = datetime(2026, 7, 6, 10, 45)   # 30분 주기 정렬 분(hh:45)
+    off_align = datetime(2026, 7, 6, 10, 37)    # 어느 쪽 정렬에도 안 걸리는 분
 
     with patch("tools.ai_shadow_scheduler.is_trading_day", return_value=True), \
-         patch("tools.ai_shadow_scheduler.is_market_open", return_value=True):
-        assert not _due(daily_cfg, time.time()), "60분 안 지났으면 daily 도 False"
+         patch("tools.ai_shadow_scheduler.is_market_open", return_value=True), \
+         patch("tools.ai_shadow_scheduler.datetime") as mock_dt:
+        mock_dt.now.return_value = aligned_15
+        assert not _due(daily_cfg, time.time()), "60분 안 지났으면(정렬 분이어도) False"
         assert not _due(minute_cfg, time.time()), "30분 안 지났으면 분봉도 False"
-        assert _due(daily_cfg, None), "첫 실행(last_run=None)+거래일이면 True"
-        assert _due(minute_cfg, time.time() - 1801), "30분 경과+장중이면 True"
+        assert _due(daily_cfg, None), "첫 실행(last_run=None)+거래일+정렬 분(hh:15)이면 True"
+        assert _due(minute_cfg, time.time() - 1801), "30분 경과+장중+정렬 분(hh:15)이면 True"
+        assert _due(fast_cfg, time.time() - 301), "정렬 대상 아닌 주기(5분)는 분 무관하게 경과만 보면 됨"
 
-    with patch("tools.ai_shadow_scheduler.is_trading_day", return_value=False):
+        # 정렬 안 된 분(hh:37) — 정각 트래픽 회피가 핵심(오너 요청, 2026-07): 경과·장상태 다 만족해도 차단
+        mock_dt.now.return_value = off_align
+        assert not _due(daily_cfg, None), "60분 주기는 hh:15 아니면 경과·거래일 만족해도 False"
+        assert not _due(minute_cfg, time.time() - 1801), "30분 주기는 hh:15/45 아니면 경과·장중 만족해도 False"
+        assert _due(fast_cfg, time.time() - 301), "정렬 대상 아닌 주기는 정렬 안 된 분이어도 그대로 True"
+
+        # 30분 주기의 두 정렬 분(hh:15 뿐 아니라 hh:45 도) 모두 통과해야 함
+        mock_dt.now.return_value = aligned_45
+        assert _due(minute_cfg, time.time() - 1801), "30분 주기는 hh:45 도 정렬 분이어야 함"
+        assert not _due(daily_cfg, None), "60분 주기는 hh:45 는 정렬 분이 아님(hh:15 만)"
+
+    with patch("tools.ai_shadow_scheduler.is_trading_day", return_value=False), \
+         patch("tools.ai_shadow_scheduler.datetime") as mock_dt:
+        mock_dt.now.return_value = aligned_15
         assert not _due(daily_cfg, None), "휴장일이면 첫 실행이어도 False(Naver 호출 생략)"
         assert not _due(daily_cfg, time.time() - 3601), "휴장일이면 주기 경과해도 False"
 
-    with patch("tools.ai_shadow_scheduler.is_market_open", return_value=False):
+    with patch("tools.ai_shadow_scheduler.is_market_open", return_value=False), \
+         patch("tools.ai_shadow_scheduler.datetime") as mock_dt:
+        mock_dt.now.return_value = aligned_15
         assert not _due(minute_cfg, time.time() - 1801), "장외(야간·주말·공휴일)면 False(Yahoo 호출 생략)"
 
 
