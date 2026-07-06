@@ -28,6 +28,21 @@ kr-trading-research python tools/<script>` 형태(UTC):
 
 > ⚠️ 백테스트 워커·파이프라인 워커는 cron 이 아니라 **데몬 컨테이너**(아래 참고).
 
+## 크론 심장박동 감시 (2026-07-07, 로드맵 §C)
+- 위 표의 모든 크론 스크립트는 `__main__` 에서 `kr_research.core.heartbeat.run_with_heartbeat("이름", main)`
+  으로 실행된다 — **성공 종료(rc 0/None)만** `cron:heartbeat:{이름}`(epoch 초, TTL 14일)에 기록.
+  "일을 안 한 성공"(휴장일 조기 종료 등)도 기록함 — 감시 대상은 "크론이 돌고 정상 종료하는가"다.
+- `monitor.py`(2시간 주기)가 `CRON_CHECKS` 기대치(주기형 max_age / 일1회형 daily_after·거래일 전용)와
+  대조해 **이상 전이 시에만** 텔레그램 경고(도배 방지, 복구 시 복구 알림). `--heartbeat` 일일 요약에
+  "크론 심장박동: 정상 N/M" 표시.
+- 호스트 크론인 `backup.sh`(kr-trading-bot `workflows/backup-restore.md`)도 성공 시 `docker exec` 로
+  `cron:heartbeat:backup` 을 기록한다.
+- **크론을 추가/제거하면 세 곳을 함께 갱신할 것**: ① 해당 tool 의 `__main__` 래퍼 ② `monitor.py` 의
+  `CRON_CHECKS` ③ 이 문서의 크론 표.
+- 한계: monitor 자신이 죽으면 감시 공백 — **매일 16:15 KST "📋 일일 점검" 메시지가 안 오면 monitor
+  크론 자체를 의심**할 것. 데몬 워커 2종(backtest/pipeline)은 크론이 아니라 대상 아님(--restart
+  unless-stopped + 콘솔 잡 지연으로 발견).
+
 ## AI 섀도 판단 — 자동 핸드오프·LLM 예산 (2026-07-06, 로드맵 §A·§E)
 - **①→② 자동 핸드오프**: `ai_universe_scan.py` 가 야간 스캔의 매수 판단 중 **확신도 상위
   `AI_AUTO_WATCH_LIMIT`(기본 5)종목**을 ② 관찰 설정(`bot:ai_configs`)에 자동 등록한다
