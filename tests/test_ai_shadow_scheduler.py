@@ -205,8 +205,15 @@ def main() -> int:
 
         store.close()
 
+    # LLM 일일 예산 가드(로드맵 §E) — 초과 시 설정 조회 전에 배치 통째로 스킵(run_once 호출 0)
+    with patch("tools.ai_shadow_scheduler.llm_budget_exceeded", return_value=True), \
+         patch("tools.ai_shadow_scheduler.run_once") as mock_gate:
+        assert sched.run_scheduler(FakeRedis(decode_responses=True), None, "fake-key") == 0
+    assert mock_gate.call_count == 0
+
     print("✅ test_ai_shadow_scheduler: due 판정(30/60분 정렬)·강제 실행(K_FORCE_RUN)·에러 격리·상태기록·발행·"
-          "유니버스 스캔 제외·삭제된 설정 뷰 필터·가상 포지션(오픈·반복매수무시·청산+실현손익) 통과")
+          "유니버스 스캔 제외·삭제된 설정 뷰 필터·가상 포지션(오픈·반복매수무시·청산+실현손익)·"
+          "LLM 예산가드(배치 스킵) 통과")
     return 0
 
 

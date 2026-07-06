@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kr_research.core.ai_store import UNIVERSE_CONFIG_NAME, AiStore, decide_virtual_trade
 from tools.ai_shadow_scheduler import _due
-from tools.llm_shadow import build_reflection_note, fetch_bars, judge_combo, log_judgment
+from tools.llm_shadow import build_reflection_note, fetch_bars, judge_combo, llm_budget_exceeded, log_judgment
 from kr_research.trading.tracking import HORIZONS, summarize_actions, summarize_by_confidence
 
 K_CONFIGS = "bot:ai_combo_configs"      # Hash(콘솔 CRUD): name → {symbol,parent_timeframe,child_timeframe,
@@ -70,6 +70,9 @@ def run_combo_scheduler(r, store: AiStore, api_key: str) -> int:
     """1회 배치. (due 이거나 K_FORCE_RUN 으로 강제된)+enabled 콤보 설정만 처리, 나머지는 건너뜀. due 판정은
     하위(자식) 타임프레임 기준으로 ai_shadow_scheduler._due() 를 그대로 재사용(장 상태 게이트 로직 중복
     방지 — 하위 프레임에 새 봉이 생겨야 재판단 의미가 있으므로). 반환=이번 배치에서 새로 기록된 판단 건수."""
+    if llm_budget_exceeded(r):  # 일일 호출 한도(로드맵 §E) — 초과 시 이번 배치 통째로 스킵(내일 자동 재개)
+        print("[ai_combo_scheduler] LLM 일일 호출 한도 초과 — 배치 스킵")
+        return 0
     configs = r.hgetall(K_CONFIGS)
     last_runs = r.hgetall(K_LAST_RUN)
     recorded = 0

@@ -161,8 +161,14 @@ def main() -> int:
 
         store.close()
 
+    # LLM 일일 예산 가드(로드맵 §E) — 초과 시 설정 조회 전에 배치 통째로 스킵(judge_combo 호출 0)
+    with patch("tools.ai_combo_scheduler.llm_budget_exceeded", return_value=True), \
+         patch("tools.ai_combo_scheduler.judge_combo") as mock_gate:
+        assert combo.run_combo_scheduler(FakeRedis(decode_responses=True), None, "fake-key") == 0
+    assert mock_gate.call_count == 0
+
     print("✅ test_ai_combo_scheduler: due 재사용 배선·강제 실행(K_FORCE_RUN)·dedup 연계·에러격리·상태기록·"
-          "발행(프리픽스 벗기기)·교차뷰격리·삭제필터·가상포지션(오픈·청산) 통과")
+          "발행(프리픽스 벗기기)·교차뷰격리·삭제필터·가상포지션(오픈·청산)·LLM 예산가드(배치 스킵) 통과")
     return 0
 
 

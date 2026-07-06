@@ -27,6 +27,19 @@ kr-trading-research python tools/<script>` 형태(UTC):
 
 > ⚠️ 백테스트 워커·파이프라인 워커는 cron 이 아니라 **데몬 컨테이너**(아래 참고).
 
+## AI 섀도 판단 — 자동 핸드오프·LLM 예산 (2026-07-06, 로드맵 §A·§E)
+- **①→② 자동 핸드오프**: `ai_universe_scan.py` 가 야간 스캔의 매수 판단 중 **확신도 상위
+  `AI_AUTO_WATCH_LIMIT`(기본 5)종목**을 ② 관찰 설정(`bot:ai_configs`)에 자동 등록한다
+  (`auto_registered="YYYYMMDD"` 표식, 기존 설정은 HSETNX 라 절대 안 덮어씀). 등록 후 **5거래일** 안에
+  가상 매수(열린 포지션)가 없으면 다음 스캔에서 자동 만료(설정·last_run·status 정리). **콘솔에서 그
+  설정을 한 번이라도 수정(토글 포함)하면 표식이 벗겨져 수동 전환**되어 만료 대상에서 빠진다. `0` 으로
+  끄기: `.env` 에 `AI_AUTO_WATCH_LIMIT=0`.
+- **LLM 일일 예산 가드**: 모든 Gemini 호출(②·③·유니버스 스캔·논쟁 2차)은 과금 시점에
+  `ai:llm:calls:{YYYYMMDD}`(Hash model→count, TTL 7일)로 집계된다. 오늘 합계가
+  `AI_LLM_DAILY_CALL_LIMIT`(기본 800, 0 이하=끔) 이상이면 각 스케줄러가 **배치를 통째로 스킵**하고
+  텔레그램으로 하루 1회 경고한다(내일 자동 재개). 유니버스 스캔의 무료 계산(콤보 후보)은 예산과 무관하게
+  계속. 콘솔 AI 탭 배너에 오늘 호출 수 표시(`/api/ai/llm-usage`).
+
 ## 백테스트 워커 (데몬)
 콘솔이 `bot:backtest:jobs` 에 적재한 spec 잡을 BLPOP 으로 즉시 처리.
 ```bash

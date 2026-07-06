@@ -3,8 +3,9 @@
 호출 0, 콜드미스(미워밍 종목)는 조용히 skip. 종목마다 tools/llm_shadow.judge_from_bars 로 Gemini 에게
 판단시키고 core/ai_store.py(개별 종목 관찰과 같은 테이블, config_name=UNIVERSE_CONFIG_NAME 으로 구분)에
 기록한다. 콘솔 "AI 테스트" 탭의 "① 유니버스 스크리닝" 단계가 읽는 bot:ai:universe:* 로 별도 발행 —
-"② 타겟 종목 관찰"(개별 설정, bot:ai:judgments)과 절대 안 섞인다. 이 단계는 아직 ②로 자동 연결되지
-않는다(오너 확인 후 다음 단계에서 연결) — 오늘의 매수 판단만 bot:ai:universe:shortlist 에 모아 둔다.
+"② 타겟 종목 관찰"(개별 설정, bot:ai:judgments)과 절대 안 섞인다. 오늘의 매수 판단은
+bot:ai:universe:shortlist 에 모으고, 그중 확신도 상위 AUTO_WATCH_LIMIT 종목은 ② 관찰 설정에 자동
+등록한다(①→② 핸드오프, 2026-07-06 오너 승인 — auto_register_watch/expire_auto_watch 참고).
 실행: python tools/ai_universe_scan.py. 크론: screen_universe.py(17:00 KST) 10분 뒤(캐시 워밍 대기).
 """
 import json
@@ -15,8 +16,10 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kr_research.core.ai_store import UNIVERSE_CONFIG_NAME, AiStore
+from kr_research.core.holidays import is_trading_day
 from tools.backtest_worker import DEFAULT_DAYS, UNIVERSE_KEY, _cache_only_fetch
-from tools.llm_shadow import _MODEL_STAGE2, _parent_permits, build_snapshot, is_notable, judge_from_bars, log_judgment
+from tools.llm_shadow import (_MODEL_STAGE2, _parent_permits, build_snapshot, is_notable, judge_from_bars,
+                              llm_budget_exceeded, log_judgment)
 from kr_research.trading.tracking import HORIZONS, summarize_actions, summarize_by_confidence
 
 _KST = timezone(timedelta(hours=9))
@@ -28,15 +31,86 @@ K_COMBO_CANDIDATES = "bot:ai:universe:combo_candidates"  # String(JSON {date,cod
 # 필터)과는 독립 조건이라 별도로 집계한다(무료 — Gemini 호출도 AiStore 기록도 없음, 매 스캔마다 재계산).
 PUBLISH_LIMIT = 300
 
+# ── ①→② 자동 핸드오프(개선 로드맵 §A) — 숏리스트 상위 후보를 ② 타겟 종목 관찰에 자동 등록 ──
+# ② 설정 Hash 는 콘솔·ai_shadow_scheduler.py 와 공유(리터럴 일치 필수 — 서로 import 안 하는 별도 저장소).
+K_WATCH_CONFIGS = "bot:ai_configs"
+K_WATCH_LAST_RUN = "bot:ai:last_run"
+K_WATCH_STATUS = "bot:ai:status"
+AUTO_WATCH_LIMIT = int(os.environ.get("AI_AUTO_WATCH_LIMIT", "5"))  # 스캔 1회당 자동 등록 상한(0=기능 끔)
+AUTO_WATCH_EXPIRE_TDAYS = 5  # 등록 후 이 거래일 수가 지나고 열린 가상 포지션이 없으면 자동 만료
+# 자동 등록 표식: cfg["auto_registered"]="YYYYMMDD"(등록일). 콘솔 백엔드(ai_configs_save)는 화이트리스트
+# 필드만 재저장하므로 **사용자가 콘솔에서 그 설정을 한 번이라도 수정(토글 포함)하면 이 표식이 벗겨져
+# "수동 입양"이 된다** — 입양된 설정은 자동 만료 대상에서 빠짐(의도된 규칙).
 
-def scan_universe(r, store: AiStore, codes: list[str], api_key: str) -> dict:
+
+def _trading_days_since(reg_date: str, today: datetime) -> int:
+    """reg_date(YYYYMMDD, 미포함) 다음날부터 today(포함)까지의 거래일 수. 파싱 불가면 0(만료 안 함)."""
+    try:
+        d = datetime.strptime(reg_date, "%Y%m%d").replace(tzinfo=_KST)
+    except (TypeError, ValueError):
+        return 0
+    count, cur = 0, d + timedelta(days=1)
+    while cur.date() <= today.date():
+        if is_trading_day(cur):
+            count += 1
+        cur += timedelta(days=1)
+    return count
+
+
+def expire_auto_watch(r, store: AiStore, now: datetime | None = None) -> list[str]:
+    """자동 등록(auto_registered) 설정 중 등록 후 AUTO_WATCH_EXPIRE_TDAYS 거래일이 지났고 열린 가상
+    포지션이 없는 것을 제거(설정·last_run·status 함께 정리). 열린 포지션이 있으면 청산될 때까지 유지
+    — 관찰 중간에 설정을 지우면 콘솔 뷰(publish_ai_view 의 활성 설정 필터)에서 그 이력이 사라지기 때문.
+    반환=만료된 설정 이름들(로그용)."""
+    now = now or datetime.now(_KST)
+    expired = []
+    for name, cfg_json in r.hgetall(K_WATCH_CONFIGS).items():
+        try:
+            cfg = json.loads(cfg_json)
+        except (TypeError, ValueError):
+            continue
+        reg = cfg.get("auto_registered")
+        if not reg or _trading_days_since(reg, now) < AUTO_WATCH_EXPIRE_TDAYS:
+            continue
+        if store.get_open_position(name, cfg.get("symbol", "")) is not None:
+            continue
+        r.hdel(K_WATCH_CONFIGS, name)
+        r.hdel(K_WATCH_LAST_RUN, name)
+        r.hdel(K_WATCH_STATUS, name)
+        expired.append(name)
+    return expired
+
+
+def auto_register_watch(r, buys: list[dict], today: str) -> list[str]:
+    """오늘 buy 판단(buys: [{code,confidence}]) 중 확신도 상위 AUTO_WATCH_LIMIT 종목을 ② 관찰 설정에
+    자동 등록. 콘솔 UniverseScanPanel 의 수동 "+ 추가"와 동일 기본값(일봉·60분·lookback 120) +
+    auto_registered 표식. HSETNX 라 기존 설정(수동·자동 무관)은 절대 덮어쓰지 않음 — 이미 있으면 다음
+    후보로 넘어가지 않고 그냥 소진(상한은 '등록 시도'가 아니라 '신규 등록' 기준). 반환=등록된 이름들."""
+    if AUTO_WATCH_LIMIT <= 0:
+        return []
+    added = []
+    ranked = sorted(buys, key=lambda b: -(b.get("confidence") or 0.0))
+    for b in ranked:
+        if len(added) >= AUTO_WATCH_LIMIT:
+            break
+        name = f"{b['code']}_daily"
+        cfg = {"symbol": b["code"], "timeframe": "daily", "lookback_days": 120, "interval_min": 60,
+               "enabled": True, "min_confidence": None, "debate": False, "auto_registered": today}
+        if r.hsetnx(K_WATCH_CONFIGS, name, json.dumps(cfg, ensure_ascii=False)):
+            added.append(name)
+    return added
+
+
+def scan_universe(r, store: AiStore, codes: list[str], api_key: str, allow_llm: bool = True) -> dict:
     """유니버스 전체를 1회 스캔 — 캐시 콜드미스는 skip. 지표만으로 특이점 없는 종목(is_notable=False)은
     Gemini 호출 자체를 생략(파이썬 규칙 기반 사전 필터, API 비용 0)하고, 통과한 소수만 정밀 모델(_MODEL_STAGE2)
     로 판단시킨다 — 300종목 전부를 매번 정밀 모델로 돌리면 비용만 늘고, 대부분은 어차피 hold로 끝나는
     "심심한 날"이라 굳이 비싼 모델로 다시 볼 필요가 없다는 판단.
-    반환 {judged,skipped,filtered,shortlist,candidates}(테스트/로그용)."""
+    allow_llm=False(일일 예산 초과, 로드맵 §E)면 Gemini 경로만 끄고 무료 계산(콤보 후보)은 그대로 수행.
+    반환 {judged,skipped,filtered,shortlist,buys,candidates}(테스트/로그용) — buys 는 shortlist 와 같은
+    종목에 confidence 를 얹은 것(자동 핸드오프 §A 의 확신도 상위 선별용, 발행 스키마는 shortlist 그대로)."""
     fetch = _cache_only_fetch(r)
-    judged, skipped, filtered, shortlist, candidates = 0, 0, 0, [], []
+    judged, skipped, filtered, shortlist, buys, candidates = 0, 0, 0, [], [], []
     for code in codes:
         bars = fetch(code, DEFAULT_DAYS)
         if not bars:
@@ -52,6 +126,9 @@ def scan_universe(r, store: AiStore, codes: list[str], api_key: str) -> dict:
         if not is_notable(snapshot):
             filtered += 1
             continue
+        if not allow_llm:
+            skipped += 1
+            continue
         try:
             record = judge_from_bars(code, bars, api_key,
                                       last_trade_date=store.last_trade_date(UNIVERSE_CONFIG_NAME, code),
@@ -66,8 +143,9 @@ def scan_universe(r, store: AiStore, codes: list[str], api_key: str) -> dict:
         judged += 1
         if record["action"] == "buy":
             shortlist.append(code)
+            buys.append({"code": code, "confidence": record.get("confidence")})
     return {"judged": judged, "skipped": skipped, "filtered": filtered,
-            "shortlist": shortlist, "candidates": candidates}
+            "shortlist": shortlist, "buys": buys, "candidates": candidates}
 
 
 def publish_universe_view(r, store: AiStore, shortlist: list[str]) -> None:
@@ -107,14 +185,20 @@ def main() -> int:
 
     store = AiStore()
     try:
-        result = scan_universe(r, store, codes, api_key)
+        allow_llm = not llm_budget_exceeded(r)  # 예산 초과여도 무료 계산(콤보 후보)은 계속(§E)
+        if not allow_llm:
+            print("[ai_universe_scan] LLM 일일 호출 한도 초과 — Gemini 판단 스킵(무료 계산만 수행)")
+        expired = expire_auto_watch(r, store)  # 먼저 만료(§A) — 오늘 등록분과 안 섞이게
+        result = scan_universe(r, store, codes, api_key, allow_llm=allow_llm)
         publish_universe_view(r, store, result["shortlist"])
         publish_combo_candidates(r, result["candidates"])
+        added = auto_register_watch(r, result["buys"], datetime.now(_KST).strftime("%Y%m%d"))
     finally:
         store.close()
     print(f"[ai_universe_scan] 유니버스={len(codes)} 판단={result['judged']} "
           f"스킵(캐시미스/중복)={result['skipped']} 사전필터제외={result['filtered']} "
-          f"매수후보={len(result['shortlist'])} 콤보후보={len(result['candidates'])}")
+          f"매수후보={len(result['shortlist'])} 콤보후보={len(result['candidates'])} "
+          f"자동등록={added} 자동만료={expired}")
     return 0
 
 

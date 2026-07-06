@@ -88,8 +88,63 @@ def main() -> int:
 
         store.close()
 
+    # ── ①→② 자동 핸드오프(로드맵 §A) — 자동 등록(상한·확신도순·비덮어쓰기)·자동 만료(입양·보유 예외) ──
+    r2 = FakeRedis(decode_responses=True)
+    with tempfile.TemporaryDirectory() as d:
+        store2 = AiStore(db_path=os.path.join(d, "t2.db"))
+
+        # 수동 설정이 이미 있는 "111111"은 HSETNX 라 덮어쓰지 않음
+        manual_cfg = {"symbol": "111111", "timeframe": "daily", "lookback_days": 200, "interval_min": 30,
+                       "enabled": False}
+        r2.hset(scan.K_WATCH_CONFIGS, "111111_daily", json.dumps(manual_cfg))
+        buys = [{"code": "111111", "confidence": 0.9}, {"code": "222222", "confidence": 0.5},
+                {"code": "333333", "confidence": 0.8}, {"code": "444444", "confidence": None}]
+        with patch.object(scan, "AUTO_WATCH_LIMIT", 2):
+            added = scan.auto_register_watch(r2, buys, today="20260706")
+        assert added == ["333333_daily", "222222_daily"], \
+            f"확신도 내림차순 + 기존 설정 비덮어쓰기(수동 111111 제외) + 상한 2: {added}"
+        assert json.loads(r2.hget(scan.K_WATCH_CONFIGS, "111111_daily")) == manual_cfg, "수동 설정 보존"
+        auto_cfg = json.loads(r2.hget(scan.K_WATCH_CONFIGS, "333333_daily"))
+        assert auto_cfg["auto_registered"] == "20260706" and auto_cfg["enabled"] is True \
+            and auto_cfg["timeframe"] == "daily" and auto_cfg["interval_min"] == 60, auto_cfg
+        with patch.object(scan, "AUTO_WATCH_LIMIT", 0):
+            assert scan.auto_register_watch(r2, buys, today="20260706") == [], "상한 0 = 기능 끔"
+
+        # 만료: 등록 5거래일 경과(20260626 등록 → 2026-07-06 기준 6거래일) + 열린 포지션 없음 → 제거
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 7, 6, 18, 0, tzinfo=timezone(timedelta(hours=9)))
+        assert scan._trading_days_since("20260626", now) >= scan.AUTO_WATCH_EXPIRE_TDAYS
+        old = {"symbol": "555555", "timeframe": "daily", "lookback_days": 120, "interval_min": 60,
+               "enabled": True, "auto_registered": "20260626"}
+        r2.hset(scan.K_WATCH_CONFIGS, "555555_daily", json.dumps(old))
+        r2.hset(scan.K_WATCH_LAST_RUN, "555555_daily", "123")
+        r2.hset(scan.K_WATCH_STATUS, "555555_daily", "{}")
+        # 같은 조건이지만 열린 가상 포지션이 있는 "666666"은 청산 전까지 유지
+        r2.hset(scan.K_WATCH_CONFIGS, "666666_daily",
+                json.dumps({**old, "symbol": "666666"}))
+        store2.open_position("666666_daily", "666666", 1, 10000, "20260626")
+
+        expired = scan.expire_auto_watch(r2, store2, now=now)
+        assert expired == ["555555_daily"], expired
+        assert not r2.hexists(scan.K_WATCH_CONFIGS, "555555_daily") \
+            and not r2.hexists(scan.K_WATCH_LAST_RUN, "555555_daily") \
+            and not r2.hexists(scan.K_WATCH_STATUS, "555555_daily"), "설정·last_run·status 함께 정리"
+        assert r2.hexists(scan.K_WATCH_CONFIGS, "666666_daily"), "열린 포지션 보유 중엔 만료 안 함"
+        assert r2.hexists(scan.K_WATCH_CONFIGS, "111111_daily"), "수동(auto_registered 없음)은 만료 대상 아님"
+        assert r2.hexists(scan.K_WATCH_CONFIGS, "333333_daily"), "최근(20260706) 등록분은 유지"
+
+        # 예산 초과(allow_llm=False) — Gemini 경로만 꺼지고 무료 계산(콤보 후보)은 계속(§E)
+        r2.set(OHLCV_CACHE_KEY.format("005930", DEFAULT_DAYS), json.dumps(_bars()))
+        with patch("tools.ai_universe_scan.judge_from_bars") as mock_judge:
+            res = scan.scan_universe(r2, store2, ["005930"], api_key="fake-key", allow_llm=False)
+        assert mock_judge.call_count == 0 and res["judged"] == 0 and res["buys"] == [], res
+        assert {c["code"] for c in res["candidates"]} == {"005930"}, "무료 계산(콤보 후보)은 예산과 무관"
+
+        store2.close()
+
     print("✅ test_ai_universe_scan: 캐시 재사용(콜드미스 skip)·사전 필터(is_notable)·정밀 모델(_MODEL_STAGE2) 전달·"
-          "숏리스트·③ 콤보후보(_parent_permits 독립)·발행 분리 통과")
+          "숏리스트·③ 콤보후보(_parent_permits 독립)·발행 분리·자동 핸드오프(상한·확신도순·비덮어쓰기·"
+          "만료+입양/보유 예외)·예산가드(allow_llm=False) 통과")
     return 0
 
 

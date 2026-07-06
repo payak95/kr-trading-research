@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kr_research.core.ai_store import UNIVERSE_CONFIG_NAME, AiStore, decide_virtual_trade
 from kr_research.core.holidays import KST, is_market_open, is_trading_day
-from tools.llm_shadow import build_reflection_note, log_judgment, run_once
+from tools.llm_shadow import build_reflection_note, llm_budget_exceeded, log_judgment, run_once
 from kr_research.trading.tracking import HORIZONS, summarize_actions, summarize_by_confidence
 
 K_CONFIGS = "bot:ai_configs"     # Hash(콘솔 CRUD): name → {symbol,timeframe,lookback_days,interval_min,enabled}
@@ -88,6 +88,9 @@ def publish_ai_view(r, store: AiStore) -> None:
 def run_scheduler(r, store: AiStore, api_key: str) -> int:
     """1회 배치. (due 이거나 K_FORCE_RUN 으로 강제된)+enabled 설정만 처리, 나머지는 건너뜀. 반환=이번
     배치에서 새로 기록된 판단 건수."""
+    if llm_budget_exceeded(r):  # 일일 호출 한도(로드맵 §E) — 초과 시 이번 배치 통째로 스킵(내일 자동 재개)
+        print("[ai_shadow_scheduler] LLM 일일 호출 한도 초과 — 배치 스킵")
+        return 0
     configs = r.hgetall(K_CONFIGS)
     last_runs = r.hgetall(K_LAST_RUN)
     recorded = 0

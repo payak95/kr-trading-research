@@ -51,6 +51,61 @@ _DEBATE_LOW, _DEBATE_HIGH = 0.4, 0.65
 _COMBO_PROMPT_VERSION = "combo_v1"  # build_combo_prompt 문구가 바뀌면 올린다(단일 프레임 _PROMPT_VERSION 과
                                     # 별개 네임스페이스 — 스키마 자체가 다름)
 
+# ── LLM 호출 집계·일일 예산 가드(개선 로드맵 §E) ──
+# call_gemini 가 과금 시점(generate_content 성공 응답)마다 Redis Hash 에 model별 카운트를 남기고,
+# 각 스케줄러(②·③·유니버스 스캔)는 배치 시작 전에 llm_budget_exceeded() 로 오늘 총합이 한도를 넘었는지
+# 확인한다 — 자동 핸드오프(§A)로 관찰 종목이 늘어도 폭주 비용을 하드캡. 한도는 "호출 수" 기준(토큰이
+# 아니라) — 모델 단가가 고정된 저비용 2종만 쓰므로 호출 수가 곧 비용의 선형 근사(월 예산 10,000원 주석 참고).
+K_LLM_CALLS_PREFIX = "ai:llm:calls:"        # + YYYYMMDD(KST) — Hash: model → 호출수. TTL 7일(집계·디버그용).
+K_LLM_WARNED_PREFIX = "ai:llm:budget_warned:"  # + YYYYMMDD — 한도 도달 텔레그램 경고 1일 1회 SETNX 마커.
+_LLM_DAILY_LIMIT = int(os.environ.get("AI_LLM_DAILY_CALL_LIMIT", "800"))  # 0 이하 = 가드 끔
+
+
+def _llm_calls_key() -> str:
+    return K_LLM_CALLS_PREFIX + datetime.now(_KST).strftime("%Y%m%d")
+
+
+def record_llm_call(model: str) -> None:
+    """Gemini 호출 1건 집계 — REDIS_URL 미설정(로컬 CLI 실험)이면 조용히 no-op. 집계 실패가 판단
+    파이프라인을 죽이면 안 되므로 모든 예외를 삼킨다(과금은 이미 발생 — 집계는 관측용일 뿐)."""
+    redis_url = os.environ.get("REDIS_URL", "")
+    if not redis_url:
+        return
+    try:
+        import redis
+        r = redis.from_url(redis_url, decode_responses=True)
+        key = _llm_calls_key()
+        pipe = r.pipeline()
+        pipe.hincrby(key, model, 1)
+        pipe.expire(key, 7 * 86400)
+        pipe.execute()
+    except Exception:
+        pass
+
+
+def llm_calls_today(r) -> int:
+    """오늘(KST) 총 Gemini 호출 수 — 모델별 카운트 합."""
+    return sum(int(v) for v in r.hgetall(_llm_calls_key()).values())
+
+
+def llm_budget_exceeded(r) -> bool:
+    """일일 호출 한도(AI_LLM_DAILY_CALL_LIMIT, 기본 800) 초과 여부 + 도달 시 텔레그램 1회 경고.
+    스케줄러가 배치 시작 전에 호출 — True 면 이번 배치의 Gemini 호출을 전부 스킵해야 한다."""
+    if _LLM_DAILY_LIMIT <= 0:
+        return False
+    calls = llm_calls_today(r)
+    if calls < _LLM_DAILY_LIMIT:
+        return False
+    warned_key = K_LLM_WARNED_PREFIX + datetime.now(_KST).strftime("%Y%m%d")
+    try:
+        if r.set(warned_key, "1", nx=True, ex=2 * 86400):
+            from kr_research.bot.notify import Notifier
+            Notifier(load_config()).send(
+                f"⚠️ AI 섀도 LLM 일일 호출 한도 도달 ({calls}/{_LLM_DAILY_LIMIT}) — 오늘 남은 판단은 스킵합니다.")
+    except Exception:
+        pass  # 경고 실패가 가드 자체를 막지 않게
+    return True
+
 
 def _bollinger_pct(closes: list[float]) -> float | None:
     boll = ind.bollinger(closes)
@@ -243,6 +298,7 @@ def call_gemini(prompt: str, api_key: str, model: str = _MODEL) -> dict | None:
     for attempt in range(_ATTEMPTS):
         try:
             resp = client.models.generate_content(model=model, contents=prompt, config=config)
+            record_llm_call(model)  # 과금 시점(성공 응답) 집계 — 429 등 거절된 재시도는 과금 없음이라 제외
             return parse_judgment((resp.text or "").strip())
         except Exception as exc:
             last_exc = exc

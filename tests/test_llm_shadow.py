@@ -351,12 +351,42 @@ def main() -> int:
     assert mock_gemini.call_count == 2 and rec_combo["action"] == "hold"
     assert rec_combo["snapshot"]["_debated"] is True
 
+    # ── LLM 호출 집계·일일 예산 가드(로드맵 §E) — fakeredis 로 카운터·한도·1회 경고 검증 ──
+    from fakeredis import FakeRedis
+    from tools import llm_shadow as mod
+
+    fr = FakeRedis(decode_responses=True)
+    with patch.dict(os.environ, {"REDIS_URL": "redis://fake"}), \
+         patch("redis.from_url", return_value=fr):
+        mod.record_llm_call(_MODEL)
+        mod.record_llm_call(_MODEL)
+        mod.record_llm_call(_MODEL_STAGE2)
+    assert mod.llm_calls_today(fr) == 3, "모델별 카운트 합이 오늘 총 호출 수"
+    key = mod._llm_calls_key()
+    assert fr.hgetall(key) == {_MODEL: "2", _MODEL_STAGE2: "1"} and fr.ttl(key) > 0, "모델별 Hash + TTL"
+
+    os.environ.pop("REDIS_URL", None)
+    mod.record_llm_call(_MODEL)  # REDIS_URL 없으면 no-op(로컬 CLI) — 예외도 카운트 증가도 없어야 함
+    assert mod.llm_calls_today(fr) == 3
+
+    sent = []
+    with patch.object(mod, "_LLM_DAILY_LIMIT", 3), \
+         patch("kr_research.bot.notify.Notifier") as mock_notifier, \
+         patch.object(mod, "load_config"):
+        mock_notifier.return_value.send.side_effect = lambda text: sent.append(text) or True
+        assert mod.llm_budget_exceeded(fr) is True, "호출 3회 = 한도 3 도달 → 초과"
+        assert mod.llm_budget_exceeded(fr) is True and len(sent) == 1, "경고는 하루 1회만(SETNX)"
+    with patch.object(mod, "_LLM_DAILY_LIMIT", 4):
+        assert mod.llm_budget_exceeded(fr) is False, "한도 미만이면 통과"
+    with patch.object(mod, "_LLM_DAILY_LIMIT", 0):
+        assert mod.llm_budget_exceeded(fr) is False, "0 이하 = 가드 끔"
+
     print("✅ test_llm_shadow: build_snapshot(히스토리)·is_notable·_parent_permits·build_prompt(CoT)·"
           "parse_judgment·call_gemini(재시도·model)·run_once·judge_from_bars·prompt_version·fetch_bars·"
           "build_combo_prompt·judge_combo(상위 게이트만+dedup, 하위 게이트 제거)·"
           "build_reflection_note(되먹임, sell 부호반전·hold 제외·pending 제외)·reflection 프롬프트 삽입·"
           "불/베어 논쟁(debate, 경계구간만 2콜·hold 제외·debate=False 보존·2차실패 폴백)·"
-          "build_debate_prompt·judge_combo debate 통과")
+          "build_debate_prompt·judge_combo debate·LLM 호출집계+예산가드(카운터·TTL·1회경고·끔) 통과")
     return 0
 
 
