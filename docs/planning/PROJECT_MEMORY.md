@@ -13,6 +13,10 @@
   자체 `trading/`·`core/` 디렉터리(executor·positions·kis_client 등 브로커 운영 코드)를 갖고 있어서, pip
   설치 시 이름이 겹치면 import 순서에 따라 어느 쪽이 로드되는지 갈리는 혼란스러운 버그가 날 수 있었다 —
   그래서 의도적으로 다른 이름을 골랐다.
+- **버전 규칙(2026-07-06): 태그 = pyproject `version`** — 소비자(kr-trading-bot·kr-trading-bot-toss)는
+  git 태그 핀(`@vX.Y.Z`)으로 설치하므로, 태그를 만드는 커밋에서 pyproject 버전을 같이 범프한다.
+  v0.1.1 까지는 pyproject 가 0.1.0 인 채 태그만 올라가 불일치했음(0.1.2 부터 일치). 릴리스 절차:
+  pyproject 범프 커밋 → push → 그 커밋에 `vX.Y.Z` 태그 → 소비자 requirements 핀 갱신.
 - **`core/config.py`/`bot/notify.py`는 kr-trading-bot 것의 축소 복제판** — KIS OAuth 필드(app_key·account_8·
   hts_id 등)가 전혀 없는 자체 버전을 새로 만들었다(REDIS_URL·TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID·
   GEMINI_API_KEY 만). `core/control_bus.py`의 `K_STRATEGIES`(="bot:strategies") 상수도 전체 파일을 끌어오는
