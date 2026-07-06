@@ -87,7 +87,8 @@ def run_scheduler(r, store: AiStore, api_key: str) -> int:
             record = run_once(code, lookback_days=int(cfg.get("lookback_days") or 120), api_key=api_key,
                                last_trade_date=store.last_trade_date(name, code),
                                timeframe=cfg.get("timeframe") or "daily",
-                               reflection=build_reflection_note(history))
+                               reflection=build_reflection_note(history),
+                               debate=bool(cfg.get("debate")))
             if record is not None:
                 store.record_judgment(name, record)
                 log_judgment(record, redis_url="", tenant="ai")  # JSONL 감사만(Redis 발행은 publish_ai_view 가 별도로)

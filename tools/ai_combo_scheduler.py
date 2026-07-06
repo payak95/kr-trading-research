@@ -91,7 +91,8 @@ def run_combo_scheduler(r, store: AiStore, api_key: str) -> int:
             history = [row for row in store.get_judgments(config_name=store_name) if row["code"] == code]
             record = judge_combo(code, parent_tf, parent_bars, child_tf, child_bars, api_key,
                                  last_trade_date=store.last_trade_date(store_name, code),
-                                 reflection=build_reflection_note(history))
+                                 reflection=build_reflection_note(history),
+                                 debate=bool(cfg.get("debate")))
             if record is not None:
                 store.record_judgment(store_name, record)
                 log_judgment(record, redis_url="", tenant="ai_combo")  # JSONL 감사만(Redis 발행은 publish_combo_view 가 별도로)

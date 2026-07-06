@@ -43,6 +43,11 @@ _NOTABLE_BOLLINGER_LOW, _NOTABLE_BOLLINGER_HIGH = 0.05, 0.95
 # 과매도(패닉)가 아니면 허가. AND 조건인 게 중요 — OR 이면 rsi>=20 은 거의 항상 참이라 사실상 항상
 # 허가되는 무의미한 게이트가 됨(첫 설계 때 리뷰에서 발견해 AND 로 수정).
 _PARENT_RSI_FLOOR = 20
+# 불/베어 논쟁(debate) 트리거 구간 — 1차 판단의 확신도가 이 경계 안(애매한 수준)일 때만 2차 Gemini 호출로
+# "정반대 입장에서 반박 후 재결정"을 강제한다. 확신 있음(>=HIGH)·사실상 관망(<LOW)은 1콜로 끝내 비용을
+# 제한(TradingAgents 식 4~5 에이전트 체인과 달리 경계 구간에서만 1콜 추가). 오너 확인 후 실측 확신도
+# 분포를 보고 조정 가능.
+_DEBATE_LOW, _DEBATE_HIGH = 0.4, 0.65
 _COMBO_PROMPT_VERSION = "combo_v1"  # build_combo_prompt 문구가 바뀌면 올린다(단일 프레임 _PROMPT_VERSION 과
                                     # 별개 네임스페이스 — 스키마 자체가 다름)
 
@@ -180,6 +185,26 @@ def build_combo_prompt(code: str, parent_label: str, parent_snapshot: dict,
     )
 
 
+def build_debate_prompt(code: str, snapshot: dict, first: dict) -> str:
+    """불/베어 논쟁(경계 확신도에서만 2차 호출, judge_from_bars/judge_combo 의 _maybe_debate 가 사용) —
+    1차 판단을 제시하고 정반대 입장에서 최대한 설득력 있게 반박을 강제한 뒤, 두 관점을 종합해 최종
+    action/confidence/reason 을 다시 정하게 한다. TradingAgents 의 강세/약세 리서처 논쟁 구조를
+    참고하되, 별도 에이전트 없이 같은 모델에 1콜만 추가하는 압축 버전. hold 는 반대 입장 정의가
+    모호해 대상 아님(호출부가 buy/sell 일 때만 부름)."""
+    payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+    opposite = "매도하거나 지금은 관망해야" if first["action"] == "buy" else "매수하거나 지금은 관망해야"
+    return (
+        f"종목코드 {code}의 지표 스냅샷(JSON)이야:\n{payload}\n\n"
+        f"방금 1차 판단은 '{first['action']}'(확신도 {first.get('confidence')})이었고, 근거는 "
+        f"'{first.get('reason', '')}' 였어. 이 확신도는 애매한 수준이라 재검토가 필요해.\n"
+        f"지금부터 정반대 입장 — 지금 {opposite} 하는 이유 — 를 같은 지표로 최대한 설득력 있게 "
+        "반박해봐. 그런 다음 원래 판단과 반박을 종합해 최종 action/confidence/reason 을 다시 정해.\n\n"
+        '아래 JSON 형식으로만 답해(다른 텍스트 금지):\n'
+        '{"debate_argument":"한국어 한두 문장(반박 논거)","action":"buy|sell|hold",'
+        '"confidence":0.0~1.0,"reason":"한국어 한 문장"}'
+    )
+
+
 def parse_judgment(text: str) -> dict | None:
     """Gemini 응답에서 JSON 판단 추출 — 마크다운 코드펜스(```json ... ```)가 섞여도 파싱."""
     text = text.strip()
@@ -197,6 +222,7 @@ def parse_judgment(text: str) -> dict | None:
         "action": data["action"], "confidence": data.get("confidence"), "reason": data.get("reason", ""),
         "market_context_analysis": data.get("market_context_analysis", ""),
         "counter_argument": data.get("counter_argument", ""),
+        "debate_argument": data.get("debate_argument"),  # 1차 응답엔 없어 None — 2차(논쟁) 응답에만 채워짐
     }
 
 
@@ -230,6 +256,28 @@ def call_gemini(prompt: str, api_key: str, model: str = _MODEL) -> dict | None:
     raise last_exc
 
 
+def _maybe_debate(code: str, snapshot: dict, judgment: dict, api_key: str, model: str, debate: bool) -> dict:
+    """확신도가 경계 구간(_DEBATE_LOW~_DEBATE_HIGH)이고 방향적 액션(buy/sell)일 때만 2차 호출로 반박·
+    재결정시킨다(hold 제외 — 반대 입장 정의가 모호 + 최빈 액션이라 비용만 증가). 2차가 실패(파싱 오류 등
+    None)하면 이미 비용을 지불한 1차 판단을 그대로 유지(폐기 금지). market_context_analysis·
+    counter_argument 는 1차 것을 그대로 두고, action/confidence/reason/debate_argument 만 2차로 덮어쓴다
+    — judge_from_bars/judge_combo 공용(콤보는 snapshot 에 {"parent":...,"child":...} 중첩째로 넘김,
+    build_debate_prompt 는 내용을 몰라도 되게 그대로 json.dumps 만 함)."""
+    if not debate or judgment["action"] not in ("buy", "sell"):
+        return judgment
+    confidence = judgment.get("confidence")
+    if confidence is None or not (_DEBATE_LOW <= confidence < _DEBATE_HIGH):
+        return judgment
+    try:
+        second = call_gemini(build_debate_prompt(code, snapshot, judgment), api_key, model)
+    except Exception:
+        second = None
+    if second is None:
+        return judgment
+    return {**judgment, "action": second["action"], "confidence": second.get("confidence"),
+            "reason": second.get("reason", ""), "debate_argument": second.get("debate_argument")}
+
+
 def log_judgment(record: dict, redis_url: str, tenant: str) -> None:
     os.makedirs(os.path.dirname(_STATE_FILE), exist_ok=True)
     with open(_STATE_FILE, "a", encoding="utf-8") as f:
@@ -247,7 +295,7 @@ def log_judgment(record: dict, redis_url: str, tenant: str) -> None:
 
 
 def judge_from_bars(code: str, bars: list[dict], api_key: str, last_trade_date: str | None = None,
-                     model: str = _MODEL, reflection: str | None = None) -> dict | None:
+                     model: str = _MODEL, reflection: str | None = None, debate: bool = False) -> dict | None:
     """이미 조회된 일봉으로 지표 스냅샷→Gemini 판단(네트워크 I/O는 Gemini 호출뿐 — 봉 조회는 호출부 책임).
     run_once(실시간 조회)와 tools/ai_universe_scan.py(캐시된 봉 재사용) 가 공유하는 핵심 로직.
     반환 레코드에 forward_returns 계산에 필요한 entry_price·trade_date 포함. 데이터 부족·파싱 실패면 None.
@@ -259,7 +307,8 @@ def judge_from_bars(code: str, bars: list[dict], api_key: str, last_trade_date: 
     model 은 어느 모델이 판단했는지 레코드에 남겨(전진검증 통계를 모델별로 나눠볼 수 있게) 그대로 저장.
     reflection(build_reflection_note 결과, 호출부가 (config,code) 스코프로 만들어 전달)을 주면 프롬프트에
     실려 Gemini 에게 과거 실적을 참고시킨다 — 레코드 스키마 변경 없이 snapshot["_reflection_injected"]
-    플래그로만 유무를 남긴다(A/B 비교용)."""
+    플래그로만 유무를 남긴다(A/B 비교용). debate=True 면 확신도가 경계 구간일 때만 _maybe_debate 로 2차
+    호출(콘솔 설정별 옵트인, 기본 False — 기존 호출부·테스트는 이 인자를 안 주므로 1콜 그대로 유지)."""
     snapshot = build_snapshot(bars)
     if snapshot is None:
         return None
@@ -269,13 +318,15 @@ def judge_from_bars(code: str, bars: list[dict], api_key: str, last_trade_date: 
     judgment = call_gemini(build_prompt(code, snapshot, reflection), api_key, model)
     if judgment is None:
         return None
+    judgment = _maybe_debate(code, snapshot, judgment, api_key, model, debate)
     return {
         "ts": datetime.now(_KST).isoformat(),
         "code": code,
         "trade_date": trade_date,
         "entry_price": snapshot["close"],
         "snapshot": {**snapshot, "_prompt_version": _PROMPT_VERSION,
-                     "_reflection_injected": reflection is not None},  # 저장용에만 태깅(프롬프트엔 이미 포함)
+                     "_reflection_injected": reflection is not None,
+                     "_debated": judgment.get("debate_argument") is not None},  # 저장용 태깅(프롬프트엔 이미 포함)
         "model": model,
         **judgment,
     }
@@ -292,18 +343,19 @@ def fetch_bars(code: str, timeframe: str = "daily", lookback_days: int = 120) ->
 
 
 def run_once(code: str, lookback_days: int, api_key: str, last_trade_date: str | None = None,
-             timeframe: str = "daily", model: str = _MODEL, reflection: str | None = None) -> dict | None:
+             timeframe: str = "daily", model: str = _MODEL, reflection: str | None = None,
+             debate: bool = False) -> dict | None:
     """일봉(기본, 네이버) 또는 분봉(timeframe="5m"/"15m"/"30m"/"60m"/"4h", tools/intraday_ohlcv.py)을
     실시간 조회한 뒤 judge_from_bars 로 판단 — 개별 종목 설정(ai_shadow_scheduler.py)용. 저장은 하지 않는다
     (호출부 책임). judge_from_bars 는 분봉이든 일봉이든 그대로(레코드의 date 필드가 12자/8자로 자연히
-    구분되어 dedup·전진검증이 스키마 변경 없이 동작). reflection 은 judge_from_bars 로 그대로 전달."""
+    구분되어 dedup·전진검증이 스키마 변경 없이 동작). reflection·debate 는 judge_from_bars 로 그대로 전달."""
     bars = fetch_bars(code, timeframe, lookback_days)
-    return judge_from_bars(code, bars, api_key, last_trade_date, model, reflection)
+    return judge_from_bars(code, bars, api_key, last_trade_date, model, reflection, debate)
 
 
 def judge_combo(code: str, parent_timeframe: str, parent_bars: list[dict], child_timeframe: str,
                 child_bars: list[dict], api_key: str, last_trade_date: str | None = None,
-                model: str = _MODEL_STAGE2, reflection: str | None = None) -> dict | None:
+                model: str = _MODEL_STAGE2, reflection: str | None = None, debate: bool = False) -> dict | None:
     """③ 콤보 관찰 핵심 로직(tools/ai_combo_scheduler.py 전용) — 상위 프레임으로 대세 허가(_parent_permits)
     를 먼저 확인하고, 통과했을 때만 Gemini 를 호출(build_combo_prompt). 허가 안 되면 Gemini 호출 없이
     None(무료) — 대세를 거스르는 진입은 코드 차원에서 원천 차단하는 구조적 안전장치는 유지.
@@ -318,7 +370,10 @@ def judge_combo(code: str, parent_timeframe: str, parent_bars: list[dict], child
     코드 변경 없이 그대로 D+N 평가에 재사용 가능(trade_date 로 dedup·forward_returns 계산에 씀).
 
     last_trade_date 는 하위 프레임의 최신 봉 날짜와 비교 — 하위 게이트는 없어졌어도 dedup 은 그대로
-    유지(데이터 안정성 — 같은 봉을 반복해서 물으면 온도 샘플링 때문에 답이 오락가락하는 노이즈만 생김)."""
+    유지(데이터 안정성 — 같은 봉을 반복해서 물으면 온도 샘플링 때문에 답이 오락가락하는 노이즈만 생김).
+
+    debate=True 면 judge_from_bars 와 동일하게 확신도 경계 구간에서만 _maybe_debate 로 2차 호출(콤보
+    설정별 옵트인, 기본 False)."""
     parent_snapshot = build_snapshot(parent_bars)
     if parent_snapshot is None or not _parent_permits(parent_snapshot):
         return None
@@ -333,14 +388,16 @@ def judge_combo(code: str, parent_timeframe: str, parent_bars: list[dict], child
         api_key, model)
     if judgment is None:
         return None
+    combo_snapshot = {"parent": parent_snapshot, "child": child_snapshot}
+    judgment = _maybe_debate(code, combo_snapshot, judgment, api_key, model, debate)
     return {
         "ts": datetime.now(_KST).isoformat(),
         "code": code,
         "trade_date": trade_date,
         "entry_price": child_snapshot["close"],
-        "snapshot": {"parent": parent_snapshot, "child": child_snapshot,
-                     "_prompt_version": _COMBO_PROMPT_VERSION,
-                     "_reflection_injected": reflection is not None},
+        "snapshot": {**combo_snapshot, "_prompt_version": _COMBO_PROMPT_VERSION,
+                     "_reflection_injected": reflection is not None,
+                     "_debated": judgment.get("debate_argument") is not None},
         "model": model,
         **judgment,
     }

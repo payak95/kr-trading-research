@@ -29,6 +29,7 @@ def main() -> int:
         assert rows[0]["market_context_analysis"] == "상승 추세 우세"
         assert rows[0]["counter_argument"] == "거래량 부족"
         assert rows[0]["model"] == "gemini-flash-lite-latest"
+        assert rows[0]["debate_argument"] is None, "논쟁(2차 호출) 없었던 판단은 NULL이어야 함"
 
         # config 가 다르면 별개 레코드(같은 signaled_at 이어도 UNIQUE 키가 다름)
         with patch("kr_research.core.ai_store.time.time", return_value=1000.0):
@@ -117,10 +118,17 @@ def main() -> int:
         s.open_position("cfg1", "005930", 10, 78000.0, "20260706")
         assert s.get_open_position("cfg1", "005930")["qty"] == 10
 
+        # debate_argument — 경계 확신도에서 2차(불/베어 논쟁) 호출이 있었던 판단은 채워져 저장돼야 함
+        # (다른 count 단언과 안 섞이게 전용 config_name 사용)
+        s.record_judgment("cfg_debate", {**rec, "debate_argument": "반박: 거래량이 뒷받침되지 않아 매도 우위"})
+        debated_row = s.get_judgments(config_name="cfg_debate")[0]
+        assert debated_row["debate_argument"] == "반박: 거래량이 뒷받침되지 않아 매도 우위"
+
         s.close()  # Windows: 임시 디렉터리 삭제 전 연결 닫기(core/store.py 테스트와 동일 관례)
 
-    print("✅ test_ai_store: 멱등 기록(CoT 필드·model 포함)·미평가 조회·수익 갱신·config_name 필터·"
-          "last_trade_date·decide_virtual_trade(반복매수무시·전량청산·고가주최소1주)·가상포지션원장 통과")
+    print("✅ test_ai_store: 멱등 기록(CoT 필드·model·debate_argument 포함)·미평가 조회·수익 갱신·"
+          "config_name 필터·last_trade_date·decide_virtual_trade(반복매수무시·전량청산·고가주최소1주)·"
+          "가상포지션원장 통과")
     return 0
 
 

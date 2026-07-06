@@ -7,9 +7,10 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from tools.llm_shadow import (
-    _COMBO_PROMPT_VERSION, _MODEL, _MODEL_STAGE2, _PROMPT_VERSION, _parent_permits, build_combo_prompt,
-    build_prompt, build_reflection_note, build_snapshot, call_gemini, fetch_bars, is_notable, judge_combo,
-    judge_from_bars, parse_judgment, run_once,
+    _COMBO_PROMPT_VERSION, _DEBATE_HIGH, _DEBATE_LOW, _MODEL, _MODEL_STAGE2, _PROMPT_VERSION,
+    _parent_permits, build_combo_prompt, build_debate_prompt, build_prompt, build_reflection_note,
+    build_snapshot, call_gemini, fetch_bars, is_notable, judge_combo, judge_from_bars, parse_judgment,
+    run_once,
 )
 
 _BARS = [{"close": 50000 + i * 100, "high": 50200 + i * 100, "low": 49800 + i * 100, "volume": 100000}
@@ -67,18 +68,22 @@ def main() -> int:
 
     assert parse_judgment('{"action":"buy","confidence":0.7,"reason":"상승추세"}') == {
         "action": "buy", "confidence": 0.7, "reason": "상승추세",
-        "market_context_analysis": "", "counter_argument": ""}, "CoT 필드 없어도(구버전 응답) 기본값으로 채움"
+        "market_context_analysis": "", "counter_argument": "", "debate_argument": None
+        }, "CoT 필드 없어도(구버전 응답) 기본값으로 채움"
     assert parse_judgment(
         '{"market_context_analysis":"상승 우세","counter_argument":"거래량 부족","action":"hold",'
         '"confidence":0.5,"reason":"중립"}'
     ) == {
         "action": "hold", "confidence": 0.5, "reason": "중립",
-        "market_context_analysis": "상승 우세", "counter_argument": "거래량 부족"}
+        "market_context_analysis": "상승 우세", "counter_argument": "거래량 부족", "debate_argument": None}
     assert parse_judgment('```json\n{"action":"hold","confidence":0.5,"reason":"중립"}\n```') == {
         "action": "hold", "confidence": 0.5, "reason": "중립",
-        "market_context_analysis": "", "counter_argument": ""}, "마크다운 코드펜스 제거"
+        "market_context_analysis": "", "counter_argument": "", "debate_argument": None}, "마크다운 코드펜스 제거"
     assert parse_judgment('{"action":"buy_now","confidence":0.9}') is None, "허용 안 된 action → None"
     assert parse_judgment("garbage") is None, "JSON 아니면 None"
+    assert parse_judgment(
+        '{"debate_argument":"반박 논거","action":"sell","confidence":0.6,"reason":"근거"}'
+    )["debate_argument"] == "반박 논거", "2차(논쟁) 응답의 debate_argument 도 추출돼야 함"
 
     # call_gemini — 일시 오류(429) 1회 후 재시도로 성공
     ok_resp = MagicMock(text='{"action":"sell","confidence":0.4,"reason":"과매수"}')
@@ -87,7 +92,8 @@ def main() -> int:
     with patch("google.genai.Client", return_value=mock_client), patch("tools.llm_shadow.time.sleep"):
         result = call_gemini("prompt", "fake-key")
     assert result == {"action": "sell", "confidence": 0.4, "reason": "과매수",
-                       "market_context_analysis": "", "counter_argument": ""}, "429 이후 재시도로 성공해야 함"
+                       "market_context_analysis": "", "counter_argument": "", "debate_argument": None
+                       }, "429 이후 재시도로 성공해야 함"
     assert mock_client.models.generate_content.call_count == 2
 
     # call_gemini — model 파라미터 미지정 시 기본(_MODEL), 지정 시 그대로 전달(유니버스 필터 통과분→_MODEL_STAGE2)
@@ -204,6 +210,69 @@ def main() -> int:
         assert rec_no_r is not None
         assert rec_no_r["snapshot"]["_reflection_injected"] is False, "reflection 미지정 시 플래그 False"
 
+    # ── 불/베어 논쟁(debate) — 경계 확신도(_DEBATE_LOW~_DEBATE_HIGH)에서만 2차 호출 ──
+    mid_confidence = (_DEBATE_LOW + _DEBATE_HIGH) / 2  # 경계 구간 한가운데
+
+    # 경계 확신도 + directional(buy) + debate=True → 2콜, 최종 action/confidence/reason 은 2차로 덮어씀
+    with patch("tools.llm_shadow.call_gemini",
+               side_effect=[{"action": "buy", "confidence": mid_confidence, "reason": "1차"},
+                            {"action": "sell", "confidence": 0.55, "reason": "2차 재검토",
+                             "debate_argument": "반박: 거래량이 뒷받침되지 않음"}]) as mock_gemini:
+        rec = judge_from_bars("005930", fake_bars, api_key="fake-key", debate=True)
+    assert rec is not None
+    assert mock_gemini.call_count == 2, "경계 확신도+debate=True 면 2차 호출까지 해야 함"
+    assert rec["action"] == "sell" and rec["confidence"] == 0.55 and rec["reason"] == "2차 재검토", \
+        "최종 action/confidence/reason 은 2차 결과로 덮어써야 함"
+    assert rec["debate_argument"] == "반박: 거래량이 뒷받침되지 않음"
+    assert rec["snapshot"]["_debated"] is True
+
+    # 확신도가 높으면(경계 밖) debate=True 여도 2차 호출 없이 1콜
+    with patch("tools.llm_shadow.call_gemini",
+               return_value={"action": "buy", "confidence": 0.9, "reason": "확실"}) as mock_gemini:
+        rec = judge_from_bars("005930", fake_bars, api_key="fake-key", debate=True)
+    assert rec is not None
+    assert mock_gemini.call_count == 1, "비경계 확신도는 1콜로 끝나야 함"
+    assert rec["snapshot"]["_debated"] is False and rec.get("debate_argument") is None
+
+    # hold 은 경계 확신도라도 논쟁 대상 아님(반대 입장 정의가 모호 + 최빈 액션)
+    with patch("tools.llm_shadow.call_gemini",
+               return_value={"action": "hold", "confidence": mid_confidence, "reason": "중립"}) as mock_gemini:
+        rec = judge_from_bars("005930", fake_bars, api_key="fake-key", debate=True)
+    assert rec is not None
+    assert mock_gemini.call_count == 1, "hold 은 경계 확신도라도 1콜(논쟁 안 함)"
+
+    # debate=False(기본)면 경계 확신도라도 기존처럼 1콜 — 이 보존이 기존 테스트 전부를 무회귀로 만든 핵심
+    with patch("tools.llm_shadow.call_gemini",
+               return_value={"action": "buy", "confidence": mid_confidence, "reason": "애매"}) as mock_gemini:
+        rec = judge_from_bars("005930", fake_bars, api_key="fake-key")
+    assert rec is not None
+    assert mock_gemini.call_count == 1, "debate 기본값 False 면 경계 확신도라도 1콜 그대로"
+    assert rec["snapshot"]["_debated"] is False
+
+    # 2차 호출이 파싱 실패(None)하면 이미 비용을 지불한 1차 판단을 그대로 유지(폐기 금지)
+    with patch("tools.llm_shadow.call_gemini",
+               side_effect=[{"action": "buy", "confidence": mid_confidence, "reason": "1차"}, None]) as mock_gemini:
+        rec = judge_from_bars("005930", fake_bars, api_key="fake-key", debate=True)
+    assert rec is not None
+    assert mock_gemini.call_count == 2, "2차 시도 자체는 했어야 함"
+    assert rec["action"] == "buy" and rec["reason"] == "1차", "2차 실패 시 1차 유지"
+    assert rec["snapshot"]["_debated"] is False
+
+    # 2차 호출이 예외를 던져도(네트워크 오류 등) 1차 유지 — _maybe_debate 의 try/except 방어
+    with patch("tools.llm_shadow.call_gemini",
+               side_effect=[{"action": "buy", "confidence": mid_confidence, "reason": "1차"},
+                            Exception("500 오류")]) as mock_gemini:
+        rec = judge_from_bars("005930", fake_bars, api_key="fake-key", debate=True)
+    assert rec is not None and rec["action"] == "buy", "2차 호출 예외도 1차로 폴백"
+
+    # build_debate_prompt — 1차 action 을 참조하고 정반대 입장을 요구해야 함
+    debate_prompt_buy = build_debate_prompt("005930", {"close": 50000},
+                                            {"action": "buy", "confidence": 0.5, "reason": "상승 신호"})
+    assert "005930" in debate_prompt_buy and "buy" in debate_prompt_buy and "매도" in debate_prompt_buy
+    debate_prompt_sell = build_debate_prompt("005930", {"close": 50000},
+                                             {"action": "sell", "confidence": 0.5, "reason": "하락 신호"})
+    assert "매수" in debate_prompt_sell, "1차가 sell 이면 반대 입장(매수)을 요구해야 함"
+
     # fetch_bars — daily 는 naver daily_ohlcv(count=lookback_days), 그 외는 intraday resolve_and_fetch
     # (run_once 가 내부적으로 이 함수를 쓰도록 리팩터됐음 — 위 run_once 테스트들이 그대로 통과하면 행동 보존 확인됨)
     with patch("tools.llm_shadow.daily_ohlcv", return_value=fake_bars) as mock_daily:
@@ -271,10 +340,23 @@ def main() -> int:
         assert rec_combo_r["snapshot"]["_reflection_injected"] is True
         assert "참고: 콤보 히스토리" in mock_gemini.call_args[0][0]
 
+    # judge_combo 도 동일한 옵트인 경로로 debate 적용(같은 _maybe_debate 재사용)
+    with patch("tools.llm_shadow._parent_permits", return_value=True), \
+         patch("tools.llm_shadow.call_gemini",
+               side_effect=[{"action": "buy", "confidence": mid_confidence, "reason": "1차"},
+                            {"action": "hold", "confidence": 0.5, "reason": "2차",
+                             "debate_argument": "반박: 상위 프레임과 모순"}]) as mock_gemini:
+        rec_combo = judge_combo("005930", "daily", parent_bars_ok, "60m", child_bars, "fake-key", debate=True)
+    assert rec_combo is not None
+    assert mock_gemini.call_count == 2 and rec_combo["action"] == "hold"
+    assert rec_combo["snapshot"]["_debated"] is True
+
     print("✅ test_llm_shadow: build_snapshot(히스토리)·is_notable·_parent_permits·build_prompt(CoT)·"
           "parse_judgment·call_gemini(재시도·model)·run_once·judge_from_bars·prompt_version·fetch_bars·"
           "build_combo_prompt·judge_combo(상위 게이트만+dedup, 하위 게이트 제거)·"
-          "build_reflection_note(되먹임, sell 부호반전·hold 제외·pending 제외)·reflection 프롬프트 삽입 통과")
+          "build_reflection_note(되먹임, sell 부호반전·hold 제외·pending 제외)·reflection 프롬프트 삽입·"
+          "불/베어 논쟁(debate, 경계구간만 2콜·hold 제외·debate=False 보존·2차실패 폴백)·"
+          "build_debate_prompt·judge_combo debate 통과")
     return 0
 
 

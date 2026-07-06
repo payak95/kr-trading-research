@@ -35,7 +35,7 @@ class AiStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     config_name TEXT, code TEXT, signaled_at REAL, trade_date TEXT,
                     action TEXT, confidence REAL, reason TEXT, entry_price REAL, snapshot_json TEXT,
-                    market_context_analysis TEXT, counter_argument TEXT, model TEXT,
+                    market_context_analysis TEXT, counter_argument TEXT, model TEXT, debate_argument TEXT,
                     ret_d1 REAL, ret_d5 REAL, ret_d20 REAL,
                     bench_d1 REAL, bench_d5 REAL, bench_d20 REAL, evaluated_at REAL,
                     UNIQUE(config_name, code, signaled_at)
@@ -53,7 +53,8 @@ class AiStore:
             )
             # CREATE TABLE IF NOT EXISTS 는 이미 만들어진 기존 DB엔 새 컬럼을 안 만든다 — CoT 필드(v2
             # 프롬프트)·model 태깅 도입 시점에 이미 운영 중인 DB를 위한 최소 마이그레이션.
-            for col in ("market_context_analysis TEXT", "counter_argument TEXT", "model TEXT"):
+            for col in ("market_context_analysis TEXT", "counter_argument TEXT", "model TEXT",
+                        "debate_argument TEXT"):
                 try:
                     self._db.execute(f"ALTER TABLE ai_judgments ADD COLUMN {col}")
                 except sqlite3.OperationalError:
@@ -62,19 +63,22 @@ class AiStore:
 
     def record_judgment(self, config_name: str, rec: dict) -> None:
         """run_once() 결과(rec: code/trade_date/entry_price/snapshot/action/confidence/reason/
-        market_context_analysis/counter_argument/model) 1건 기록.
+        market_context_analysis/counter_argument/model/debate_argument) 1건 기록.
+        debate_argument 는 확신도 경계 구간에서 2차(불/베어 논쟁) 호출이 있었을 때만 채워짐(없으면 NULL
+        — 이 판단이 논쟁을 거치지 않았다는 사실 자체가 감사에 남는다).
         멱등: 같은 (config_name, code, signaled_at) 재기록은 무시(스케줄러가 trade_date 로 이미 중복
         호출을 막지만, 저장 레벨에서도 방어)."""
         with self._lock:
             self._db.execute(
                 "INSERT OR IGNORE INTO ai_judgments"
                 "(config_name, code, signaled_at, trade_date, action, confidence, reason, entry_price,"
-                " snapshot_json, market_context_analysis, counter_argument, model)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " snapshot_json, market_context_analysis, counter_argument, model, debate_argument)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (config_name, rec.get("code"), time.time(), rec.get("trade_date"),
                  rec.get("action"), rec.get("confidence"), rec.get("reason"), rec.get("entry_price"),
                  json.dumps(rec.get("snapshot"), ensure_ascii=False),
-                 rec.get("market_context_analysis"), rec.get("counter_argument"), rec.get("model")),
+                 rec.get("market_context_analysis"), rec.get("counter_argument"), rec.get("model"),
+                 rec.get("debate_argument")),
             )
             self._db.commit()
 
