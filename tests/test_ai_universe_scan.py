@@ -54,18 +54,29 @@ def main() -> int:
         assert result["judged"] == 2 and result["skipped"] == 1 and result["filtered"] == 1, result
         assert result["shortlist"] == ["005930"], "buy 판단만 숏리스트에 담김"
 
+        # ③ 콤보 상위 게이트 후보 — is_notable 과 독립: "005938"(심심해서 사전필터엔 걸림)도 상승 추세라
+        # 후보엔 포함돼야 함(수치로 검증됨: close=50060>=sma20=50030, rsi14=55>=20). 콜드미스("035420")만 제외.
+        assert {c["code"] for c in result["candidates"]} == {"005930", "000660", "005938"}, result["candidates"]
+        cand_005938 = next(c for c in result["candidates"] if c["code"] == "005938")
+        assert cand_005938["close"] > 0 and cand_005938["sma20"] > 0 and cand_005938["rsi14"] > 0
+
         rows = store.get_judgments(config_name=UNIVERSE_CONFIG_NAME)
         assert len(rows) == 2 and all(row["config_name"] == UNIVERSE_CONFIG_NAME for row in rows)
         assert "005938" not in [row["code"] for row in rows], "특이점 없는 종목은 Gemini 호출 자체가 생략됨"
 
         # 발행 — bot:ai:universe:* 로만, 개별 종목 뷰(bot:ai:judgments)와 무관
         scan.publish_universe_view(r, store, result["shortlist"])
+        scan.publish_combo_candidates(r, result["candidates"])
         assert r.exists(scan.K_JUDGMENTS) and r.exists(scan.K_SUMMARY) and r.exists(scan.K_SHORTLIST)
         assert not r.exists("bot:ai:judgments"), "유니버스 스캔은 개별 종목 뷰 키를 안 건드림"
         shortlist = json.loads(r.get(scan.K_SHORTLIST))
         assert shortlist["codes"] == ["005930"]
         summary = json.loads(r.get(scan.K_SUMMARY))
         assert summary["by_mode"]["buy"]["signals"] == 1 and summary["by_mode"]["hold"]["signals"] == 1
+
+        combo_candidates = json.loads(r.get(scan.K_COMBO_CANDIDATES))
+        assert combo_candidates["date"] and len(combo_candidates["codes"]) == 3
+        assert {c["code"] for c in combo_candidates["codes"]} == {"005930", "000660", "005938"}
 
         # 동일 trade_date 재스캔 — judge_from_bars 에 직전 trade_date 가 전달됨(중복 방지는 judge_from_bars 책임)
         with patch("tools.ai_universe_scan.judge_from_bars") as mock_judge, \
@@ -78,7 +89,7 @@ def main() -> int:
         store.close()
 
     print("✅ test_ai_universe_scan: 캐시 재사용(콜드미스 skip)·사전 필터(is_notable)·정밀 모델(_MODEL_STAGE2) 전달·"
-          "숏리스트·발행 분리 통과")
+          "숏리스트·③ 콤보후보(_parent_permits 독립)·발행 분리 통과")
     return 0
 
 

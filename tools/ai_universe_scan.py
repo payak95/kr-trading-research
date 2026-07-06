@@ -16,13 +16,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kr_research.core.ai_store import UNIVERSE_CONFIG_NAME, AiStore
 from tools.backtest_worker import DEFAULT_DAYS, UNIVERSE_KEY, _cache_only_fetch
-from tools.llm_shadow import _MODEL_STAGE2, build_snapshot, is_notable, judge_from_bars, log_judgment
+from tools.llm_shadow import _MODEL_STAGE2, _parent_permits, build_snapshot, is_notable, judge_from_bars, log_judgment
 from kr_research.trading.tracking import HORIZONS, summarize_actions, summarize_by_confidence
 
 _KST = timezone(timedelta(hours=9))
 K_JUDGMENTS = "bot:ai:universe:judgments"  # String(JSON list) — 콘솔 "① 유니버스 스크리닝" 결과 테이블
 K_SUMMARY = "bot:ai:universe:summary"      # String(JSON) — trading.tracking.summarize_actions 출력(action별, sell 부호 반전)
 K_SHORTLIST = "bot:ai:universe:shortlist"  # String(JSON {date,codes}) — 오늘 buy 판단만(다음 단계 준비, 미연결)
+K_COMBO_CANDIDATES = "bot:ai:universe:combo_candidates"  # String(JSON {date,codes:[{code,close,sma20,rsi14}]})
+# — ③ 콤보 관찰의 상위(일봉) 게이트(_parent_permits)를 통과하는 종목 후보. is_notable(위 Gemini 대상
+# 필터)과는 독립 조건이라 별도로 집계한다(무료 — Gemini 호출도 AiStore 기록도 없음, 매 스캔마다 재계산).
 PUBLISH_LIMIT = 300
 
 
@@ -31,9 +34,9 @@ def scan_universe(r, store: AiStore, codes: list[str], api_key: str) -> dict:
     Gemini 호출 자체를 생략(파이썬 규칙 기반 사전 필터, API 비용 0)하고, 통과한 소수만 정밀 모델(_MODEL_STAGE2)
     로 판단시킨다 — 300종목 전부를 매번 정밀 모델로 돌리면 비용만 늘고, 대부분은 어차피 hold로 끝나는
     "심심한 날"이라 굳이 비싼 모델로 다시 볼 필요가 없다는 판단.
-    반환 {judged,skipped,filtered,shortlist}(테스트/로그용)."""
+    반환 {judged,skipped,filtered,shortlist,candidates}(테스트/로그용)."""
     fetch = _cache_only_fetch(r)
-    judged, skipped, filtered, shortlist = 0, 0, 0, []
+    judged, skipped, filtered, shortlist, candidates = 0, 0, 0, [], []
     for code in codes:
         bars = fetch(code, DEFAULT_DAYS)
         if not bars:
@@ -43,6 +46,9 @@ def scan_universe(r, store: AiStore, codes: list[str], api_key: str) -> dict:
         if snapshot is None:
             skipped += 1
             continue
+        if _parent_permits(snapshot):  # ③ 콤보 상위 게이트 — is_notable 과 독립(순서가 그 앞이어야 함:
+            candidates.append({"code": code, "close": snapshot["close"],  # 극단적이진 않지만 상승 추세인
+                                "sma20": snapshot["sma20"], "rsi14": snapshot["rsi14"]})  # 종목도 잡아야 함)
         if not is_notable(snapshot):
             filtered += 1
             continue
@@ -60,7 +66,8 @@ def scan_universe(r, store: AiStore, codes: list[str], api_key: str) -> dict:
         judged += 1
         if record["action"] == "buy":
             shortlist.append(code)
-    return {"judged": judged, "skipped": skipped, "filtered": filtered, "shortlist": shortlist}
+    return {"judged": judged, "skipped": skipped, "filtered": filtered,
+            "shortlist": shortlist, "candidates": candidates}
 
 
 def publish_universe_view(r, store: AiStore, shortlist: list[str]) -> None:
@@ -72,6 +79,13 @@ def publish_universe_view(r, store: AiStore, shortlist: list[str]) -> None:
     r.set(K_SUMMARY, json.dumps(summary, ensure_ascii=False))
     r.set(K_SHORTLIST, json.dumps(
         {"date": datetime.now(_KST).strftime("%Y%m%d"), "codes": shortlist}, ensure_ascii=False))
+
+
+def publish_combo_candidates(r, candidates: list[dict]) -> None:
+    """③ 콤보 관찰의 상위(일봉) 게이트 통과 후보 재발행 — AiStore 를 안 거치는 순수 계산값(매 스캔 재생성).
+    K_SHORTLIST 와 같은 {date,codes} 스키마."""
+    r.set(K_COMBO_CANDIDATES, json.dumps(
+        {"date": datetime.now(_KST).strftime("%Y%m%d"), "codes": candidates}, ensure_ascii=False))
 
 
 def main() -> int:
@@ -95,11 +109,12 @@ def main() -> int:
     try:
         result = scan_universe(r, store, codes, api_key)
         publish_universe_view(r, store, result["shortlist"])
+        publish_combo_candidates(r, result["candidates"])
     finally:
         store.close()
     print(f"[ai_universe_scan] 유니버스={len(codes)} 판단={result['judged']} "
           f"스킵(캐시미스/중복)={result['skipped']} 사전필터제외={result['filtered']} "
-          f"매수후보={len(result['shortlist'])}")
+          f"매수후보={len(result['shortlist'])} 콤보후보={len(result['candidates'])}")
     return 0
 
 
