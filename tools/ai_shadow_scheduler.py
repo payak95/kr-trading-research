@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kr_research.core.ai_store import UNIVERSE_CONFIG_NAME, AiStore, decide_virtual_trade
 from kr_research.core.holidays import is_market_open, is_trading_day
-from tools.llm_shadow import log_judgment, run_once
+from tools.llm_shadow import build_reflection_note, log_judgment, run_once
 from kr_research.trading.tracking import HORIZONS, summarize_actions, summarize_by_confidence
 
 K_CONFIGS = "bot:ai_configs"     # Hash(콘솔 CRUD): name → {symbol,timeframe,lookback_days,interval_min,enabled}
@@ -82,9 +82,12 @@ def run_scheduler(r, store: AiStore, api_key: str) -> int:
             continue
         code = cfg.get("symbol", "")
         try:
+            # (config, code) 로 스코프한 과거 이력만 되먹임 — 콤보(③)는 다른 의사결정 맥락이라 안 섞음.
+            history = [row for row in store.get_judgments(config_name=name) if row["code"] == code]
             record = run_once(code, lookback_days=int(cfg.get("lookback_days") or 120), api_key=api_key,
                                last_trade_date=store.last_trade_date(name, code),
-                               timeframe=cfg.get("timeframe") or "daily")
+                               timeframe=cfg.get("timeframe") or "daily",
+                               reflection=build_reflection_note(history))
             if record is not None:
                 store.record_judgment(name, record)
                 log_judgment(record, redis_url="", tenant="ai")  # JSONL 감사만(Redis 발행은 publish_ai_view 가 별도로)

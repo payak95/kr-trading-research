@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kr_research.core.ai_store import UNIVERSE_CONFIG_NAME, AiStore, decide_virtual_trade
 from tools.ai_shadow_scheduler import _due
-from tools.llm_shadow import fetch_bars, judge_combo, log_judgment
+from tools.llm_shadow import build_reflection_note, fetch_bars, judge_combo, log_judgment
 from kr_research.trading.tracking import HORIZONS, summarize_actions, summarize_by_confidence
 
 K_CONFIGS = "bot:ai_combo_configs"      # Hash(콘솔 CRUD): name → {symbol,parent_timeframe,child_timeframe,
@@ -87,8 +87,11 @@ def run_combo_scheduler(r, store: AiStore, api_key: str) -> int:
             parent_tf = cfg.get("parent_timeframe") or "daily"
             parent_bars = fetch_bars(code, parent_tf)
             child_bars = fetch_bars(code, child_tf)
+            # (콤보 설정, code) 로 스코프한 과거 이력만 되먹임 — ②(단일 프레임)와 다른 의사결정 맥락.
+            history = [row for row in store.get_judgments(config_name=store_name) if row["code"] == code]
             record = judge_combo(code, parent_tf, parent_bars, child_tf, child_bars, api_key,
-                                 last_trade_date=store.last_trade_date(store_name, code))
+                                 last_trade_date=store.last_trade_date(store_name, code),
+                                 reflection=build_reflection_note(history))
             if record is not None:
                 store.record_judgment(store_name, record)
                 log_judgment(record, redis_url="", tenant="ai_combo")  # JSONL 감사만(Redis 발행은 publish_combo_view 가 별도로)

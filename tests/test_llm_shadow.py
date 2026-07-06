@@ -8,8 +8,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from tools.llm_shadow import (
     _COMBO_PROMPT_VERSION, _MODEL, _MODEL_STAGE2, _PROMPT_VERSION, _parent_permits, build_combo_prompt,
-    build_prompt, build_snapshot, call_gemini, fetch_bars, is_notable, judge_combo, judge_from_bars,
-    parse_judgment, run_once,
+    build_prompt, build_reflection_note, build_snapshot, call_gemini, fetch_bars, is_notable, judge_combo,
+    judge_from_bars, parse_judgment, run_once,
 )
 
 _BARS = [{"close": 50000 + i * 100, "high": 50200 + i * 100, "low": 49800 + i * 100, "volume": 100000}
@@ -52,6 +52,18 @@ def main() -> int:
     prompt = build_prompt("005930", {"close": 50000})
     assert "005930" in prompt and '"close":50000' in prompt, "JSON 압축 직렬화(공백 없음)로 포함돼야 함"
     assert "market_context_analysis" in prompt and "counter_argument" in prompt, "CoT 필드 요청 포함돼야 함"
+
+    # 되먹임(reflection) — 없으면(None, 기본값) 프롬프트가 byte-identical 이어야 기존 테스트가 안 깨짐
+    assert build_prompt("005930", {"close": 50000}, reflection=None) == prompt, "reflection=None 이면 기존과 동일"
+    prompt_r = build_prompt("005930", {"close": 50000}, reflection="참고: 테스트 노트")
+    assert "참고: 테스트 노트" in prompt_r and prompt_r != prompt
+
+    combo_prompt_no_r = build_combo_prompt("005930", "daily", {"close": 70000}, "60m", {"close": 70100})
+    assert build_combo_prompt("005930", "daily", {"close": 70000}, "60m", {"close": 70100},
+                              reflection=None) == combo_prompt_no_r, "콤보도 reflection=None 이면 기존과 동일"
+    combo_prompt_r = build_combo_prompt("005930", "daily", {"close": 70000}, "60m", {"close": 70100},
+                                        reflection="참고: 콤보 노트")
+    assert "참고: 콤보 노트" in combo_prompt_r and combo_prompt_r != combo_prompt_no_r
 
     assert parse_judgment('{"action":"buy","confidence":0.7,"reason":"상승추세"}') == {
         "action": "buy", "confidence": 0.7, "reason": "상승추세",
@@ -156,6 +168,42 @@ def main() -> int:
         prompt_arg = mock_gemini.call_args[0][0]
         assert "_prompt_version" not in prompt_arg, "버전 태그가 Gemini 프롬프트에 섞이면 안 됨"
 
+    # ── build_reflection_note — 과거 판단 이력 → 프롬프트용 되먹임 문구(순수 함수) ──
+    assert build_reflection_note([]) is None, "이력 없으면 None"
+    assert build_reflection_note([{"action": "buy", "ret_d5": 0.02} for _ in range(4)]) is None, \
+        "min_n(기본 5) 미만이면 None(초기 노이즈 방지)"
+    # 미평가(ret_d5=None, pending) 행은 표본에서 제외 — evaluated 3건뿐이면 min_n 미달
+    pending_mix = [{"action": "buy", "ret_d5": 0.02} for _ in range(3)] + \
+                  [{"action": "buy", "ret_d5": None} for _ in range(5)]
+    assert build_reflection_note(pending_mix) is None, "평가완료 3건<min_n(5) — pending 은 표본 아님"
+    pending_mix_ok = [{"action": "buy", "ret_d5": 0.02} for _ in range(5)] + \
+                     [{"action": "buy", "ret_d5": None} for _ in range(3)]
+    note_ok = build_reflection_note(pending_mix_ok)
+    assert note_ok is not None and "5건" in note_ok, "pending 을 빼고도 평가완료 5건이면 통과"
+
+    # sell 이 많고 가격이 '올랐다'(=매도 판단이 틀렸다) — 부호반전 없이 raw 집계하면 승률이 100%처럼
+    # 보이는 함정이 있음(summarize_actions 가 sell 부호를 반전해 "판단이 맞았는가"로 통일해줘야 함).
+    sell_wrong = [{"action": "sell", "ret_d5": 0.03} for _ in range(6)]
+    note_sell = build_reflection_note(sell_wrong, min_n=5)
+    assert note_sell is not None and "6건" in note_sell
+    assert "0%" in note_sell, "매도 후 가격이 올랐으니(판단 실패) 부호반전 적용 시 승률 0%여야 함"
+    assert "-3.0" in note_sell, "부호반전 적용 시 평균수익도 음수(-3.0%)여야 함"
+
+    # hold 행은 방향적 베팅이 아니므로 집계에서 완전히 제외돼야 함(섞여도 결과가 그대로여야 함)
+    mixed_with_hold = sell_wrong + [{"action": "hold", "ret_d5": 0.9} for _ in range(10)]
+    assert build_reflection_note(mixed_with_hold, min_n=5) == note_sell, "hold 는 집계에 영향 없어야 함"
+
+    # judge_from_bars — reflection 이 프롬프트에 실리고, snapshot 에 주입 여부(_reflection_injected) 태깅
+    with patch("tools.llm_shadow.call_gemini",
+               return_value={"action": "hold", "confidence": 0.5, "reason": "r"}) as mock_gemini:
+        rec_r = judge_from_bars("005930", fake_bars, api_key="fake-key", reflection="참고: 히스토리 노트")
+        assert rec_r is not None
+        assert rec_r["snapshot"]["_reflection_injected"] is True
+        assert "참고: 히스토리 노트" in mock_gemini.call_args[0][0], "reflection 이 실제 프롬프트에 포함돼야 함"
+        rec_no_r = judge_from_bars("005930", fake_bars, api_key="fake-key")
+        assert rec_no_r is not None
+        assert rec_no_r["snapshot"]["_reflection_injected"] is False, "reflection 미지정 시 플래그 False"
+
     # fetch_bars — daily 는 naver daily_ohlcv(count=lookback_days), 그 외는 intraday resolve_and_fetch
     # (run_once 가 내부적으로 이 함수를 쓰도록 리팩터됐음 — 위 run_once 테스트들이 그대로 통과하면 행동 보존 확인됨)
     with patch("tools.llm_shadow.daily_ohlcv", return_value=fake_bars) as mock_daily:
@@ -213,9 +261,20 @@ def main() -> int:
         assert same is None
         mock_gemini.assert_not_called()
 
+    # judge_combo — reflection 도 build_prompt 와 동일하게 프롬프트에 실리고 _reflection_injected 태깅됨
+    with patch("tools.llm_shadow._parent_permits", return_value=True), \
+         patch("tools.llm_shadow.call_gemini",
+               return_value={"action": "buy", "confidence": 0.8, "reason": "z"}) as mock_gemini:
+        rec_combo_r = judge_combo("005930", "daily", parent_bars_ok, "60m", child_bars, "fake-key",
+                                  reflection="참고: 콤보 히스토리")
+        assert rec_combo_r is not None
+        assert rec_combo_r["snapshot"]["_reflection_injected"] is True
+        assert "참고: 콤보 히스토리" in mock_gemini.call_args[0][0]
+
     print("✅ test_llm_shadow: build_snapshot(히스토리)·is_notable·_parent_permits·build_prompt(CoT)·"
           "parse_judgment·call_gemini(재시도·model)·run_once·judge_from_bars·prompt_version·fetch_bars·"
-          "build_combo_prompt·judge_combo(상위 게이트만+dedup, 하위 게이트 제거) 통과")
+          "build_combo_prompt·judge_combo(상위 게이트만+dedup, 하위 게이트 제거)·"
+          "build_reflection_note(되먹임, sell 부호반전·hold 제외·pending 제외)·reflection 프롬프트 삽입 통과")
     return 0
 
 

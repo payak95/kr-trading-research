@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kr_research.core.config import load_config
 from tools.naver_ohlcv import daily_ohlcv
 from kr_research.trading import indicators as ind
+from kr_research.trading.tracking import summarize_actions
 
 _KST = timezone(timedelta(hours=9))
 _MODEL = "gemini-flash-lite-latest"  # telegram-market-bot 과 동일(저비용) 모델로 통일 — 대량 스캔·개별 관찰 기본
@@ -26,6 +27,8 @@ _MODEL = "gemini-flash-lite-latest"  # telegram-market-bot 과 동일(저비용)
 _MODEL_STAGE2 = "gemini-3-flash-preview"
 _PROMPT_VERSION = "v2"  # build_prompt() 문구가 바뀌면 올린다 — 저장 레코드에 심어 전진검증 통계가 프롬프트
                         # 버전 간에 섞이지 않게 구분 가능(과거 레코드엔 소급 불가하니 지금부터 기록)
+                        # reflection(되먹임) 유무는 이 버전과 별개 — call 마다 달라지는 가변 데이터라 정적
+                        # 버전으로 표현 불가, snapshot["_reflection_injected"] 플래그로 따로 추적한다.
 _STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state", "shadow_judgments.jsonl")
 _MAX_REDIS_RECORDS = 199  # LTRIM 0 199 — 최근 200건 보관(다른 status:logs 는 50, 판단 리뷰용이라 더 길게)
 _ATTEMPTS = 3  # call_gemini 일시 오류(429/5xx) 재시도 횟수 — telegram-market-bot/tools/summarize.py 와 동일 패턴
@@ -107,11 +110,32 @@ def _parent_permits(snapshot: dict) -> bool:
     return close >= sma20 and rsi >= _PARENT_RSI_FLOOR
 
 
-def build_prompt(code: str, snapshot: dict) -> str:
+def build_reflection_note(rows: list[dict], min_n: int = 5, horizon: int = 5) -> str | None:
+    """과거 판단 이력(같은 config·종목으로 이미 스코프됨, 호출부 책임) → 다음 프롬프트에 넣을 한국어
+    한 단락(없으면 None). hold 는 방향적 베팅이 아니라 제외(action∈{buy,sell}만) — hold 를 섞으면
+    "판단이 맞았는가" 집계가 왜곡된다. `summarize_actions`(trading/tracking.py)를 그대로 재사용해
+    sell 부호 반전을 얻는다 — 반전 없이 raw 집계하면 매도 위주 이력의 승률이 거꾸로 나온다.
+    표본이 min_n 미만이면 None(초기엔 노이즈뿐이라 사실인 양 주입하면 오히려 판단을 왜곡시킴).
+    문구는 사실·완충 표현만 담고 "그러니 매수/매도해"류 지시는 넣지 않는다(모델이 직접 재평가하게)."""
+    directional = [r for r in rows if r.get("action") in ("buy", "sell")]
+    if not directional:
+        return None
+    agg = summarize_actions(directional, horizons=(horizon,))["all"]
+    n_eval = agg["signals"] - agg[f"pending_d{horizon}"]
+    win, avg = agg.get(f"win_d{horizon}"), agg.get(f"avg_d{horizon}")
+    if n_eval < min_n or win is None or avg is None:
+        return None
+    return (f"참고(과거 실적, 맹신 말 것): 이 종목 과거 평가 {n_eval}건 중 D+{horizon} 방향적중 "
+            f"{win * 100:.0f}%, 평균 {avg * 100:+.1f}%.")
+
+
+def build_prompt(code: str, snapshot: dict, reflection: str | None = None) -> str:
     payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+    note = f"{reflection}\n\n" if reflection else ""
     return (
         f"너는 한국 주식 단기 트레이더야. 종목코드 {code}의 최근 지표 스냅샷(JSON, *_history 는 오늘 포함 "
         f"최근 {_HISTORY_LEN}거래일 추이)이야:\n{payload}\n\n"
+        f"{note}"
         "이 지표만 근거로 판단해. 다른 지식(뉴스·펀더멘털)은 쓰지 마. 결론을 바로 내지 말고 아래 순서로 "
         "먼저 분석한 뒤 최종 판단해:\n"
         "1) market_context_analysis: 지표들의 추이가 상승/하락 중 어느 쪽에 더 힘을 싣는지 한국어 한 문장\n"
@@ -125,19 +149,21 @@ def build_prompt(code: str, snapshot: dict) -> str:
 
 
 def build_combo_prompt(code: str, parent_label: str, parent_snapshot: dict,
-                       child_label: str, child_snapshot: dict) -> str:
+                       child_label: str, child_snapshot: dict, reflection: str | None = None) -> str:
     """③ 콤보 관찰 전용 프롬프트 — 상위 프레임(대세 게이트 통과분)과 하위 프레임(필터 없음, 그대로) 스냅샷을
     함께 넘겨, 대세를 거스르지 않는 선에서 하위 프레임의 단기 타이밍을 Gemini 가 스스로 종합 판단하게
     한다. 하위 프레임엔 규칙 기반 사전 필터(is_notable)가 더 이상 없음 — 타이밍 판단 자체를 전적으로
     Gemini 에게 맡기기로 한 오너 결정(2026-07, judge_combo 참고). CoT 스키마는 build_prompt 와 동일."""
     parent_payload = json.dumps(parent_snapshot, ensure_ascii=False, separators=(",", ":"))
     child_payload = json.dumps(child_snapshot, ensure_ascii=False, separators=(",", ":"))
+    note = f"{reflection}\n\n" if reflection else ""
     return (
         f"너는 한국 주식 단기 트레이더야. 종목코드 {code}의 상위 프레임({parent_label}, 대세 판단용)과 "
         f"하위 프레임({child_label}, 타이밍 판단용) 지표 스냅샷(JSON, *_history 는 각 프레임 기준 최근 "
         f"{_HISTORY_LEN}봉 추이)이야.\n"
         f"상위 프레임({parent_label}): {parent_payload}\n"
         f"하위 프레임({child_label}): {child_payload}\n\n"
+        f"{note}"
         "상위 프레임에서 대세가 매수하기 나쁘지 않은 상태라는 건 이미 확인됐어. 하위 프레임에는 아무 "
         "필터도 걸려있지 않으니, 지금이 실제로 진입할 만한 타이밍인지 하위 프레임 지표를 보고 스스로 "
         "종합적으로 판단해. 다른 지식(뉴스·펀더멘털)은 쓰지 마. 결론을 바로 내지 말고 아래 순서로 먼저 "
@@ -221,7 +247,7 @@ def log_judgment(record: dict, redis_url: str, tenant: str) -> None:
 
 
 def judge_from_bars(code: str, bars: list[dict], api_key: str, last_trade_date: str | None = None,
-                     model: str = _MODEL) -> dict | None:
+                     model: str = _MODEL, reflection: str | None = None) -> dict | None:
     """이미 조회된 일봉으로 지표 스냅샷→Gemini 판단(네트워크 I/O는 Gemini 호출뿐 — 봉 조회는 호출부 책임).
     run_once(실시간 조회)와 tools/ai_universe_scan.py(캐시된 봉 재사용) 가 공유하는 핵심 로직.
     반환 레코드에 forward_returns 계산에 필요한 entry_price·trade_date 포함. 데이터 부족·파싱 실패면 None.
@@ -230,14 +256,17 @@ def judge_from_bars(code: str, bars: list[dict], api_key: str, last_trade_date: 
     **Gemini 호출 자체를 생략**하고 None 반환 — 일봉은 새 거래일이 오기 전엔 안 바뀌므로, 같은 스냅샷을
     반복해서 물으면 토큰 낭비 + 온도 샘플링 때문에 buy/sell 을 오락가락하는 노이즈만 생김.
 
-    model 은 어느 모델이 판단했는지 레코드에 남겨(전진검증 통계를 모델별로 나눠볼 수 있게) 그대로 저장."""
+    model 은 어느 모델이 판단했는지 레코드에 남겨(전진검증 통계를 모델별로 나눠볼 수 있게) 그대로 저장.
+    reflection(build_reflection_note 결과, 호출부가 (config,code) 스코프로 만들어 전달)을 주면 프롬프트에
+    실려 Gemini 에게 과거 실적을 참고시킨다 — 레코드 스키마 변경 없이 snapshot["_reflection_injected"]
+    플래그로만 유무를 남긴다(A/B 비교용)."""
     snapshot = build_snapshot(bars)
     if snapshot is None:
         return None
     trade_date = bars[-1]["date"]
     if last_trade_date is not None and trade_date == last_trade_date:
         return None
-    judgment = call_gemini(build_prompt(code, snapshot), api_key, model)
+    judgment = call_gemini(build_prompt(code, snapshot, reflection), api_key, model)
     if judgment is None:
         return None
     return {
@@ -245,7 +274,8 @@ def judge_from_bars(code: str, bars: list[dict], api_key: str, last_trade_date: 
         "code": code,
         "trade_date": trade_date,
         "entry_price": snapshot["close"],
-        "snapshot": {**snapshot, "_prompt_version": _PROMPT_VERSION},  # 저장용에만 태깅(Gemini 프롬프트엔 안 보냄)
+        "snapshot": {**snapshot, "_prompt_version": _PROMPT_VERSION,
+                     "_reflection_injected": reflection is not None},  # 저장용에만 태깅(프롬프트엔 이미 포함)
         "model": model,
         **judgment,
     }
@@ -262,18 +292,18 @@ def fetch_bars(code: str, timeframe: str = "daily", lookback_days: int = 120) ->
 
 
 def run_once(code: str, lookback_days: int, api_key: str, last_trade_date: str | None = None,
-             timeframe: str = "daily", model: str = _MODEL) -> dict | None:
+             timeframe: str = "daily", model: str = _MODEL, reflection: str | None = None) -> dict | None:
     """일봉(기본, 네이버) 또는 분봉(timeframe="5m"/"15m"/"30m"/"60m"/"4h", tools/intraday_ohlcv.py)을
     실시간 조회한 뒤 judge_from_bars 로 판단 — 개별 종목 설정(ai_shadow_scheduler.py)용. 저장은 하지 않는다
     (호출부 책임). judge_from_bars 는 분봉이든 일봉이든 그대로(레코드의 date 필드가 12자/8자로 자연히
-    구분되어 dedup·전진검증이 스키마 변경 없이 동작)."""
+    구분되어 dedup·전진검증이 스키마 변경 없이 동작). reflection 은 judge_from_bars 로 그대로 전달."""
     bars = fetch_bars(code, timeframe, lookback_days)
-    return judge_from_bars(code, bars, api_key, last_trade_date, model)
+    return judge_from_bars(code, bars, api_key, last_trade_date, model, reflection)
 
 
 def judge_combo(code: str, parent_timeframe: str, parent_bars: list[dict], child_timeframe: str,
                 child_bars: list[dict], api_key: str, last_trade_date: str | None = None,
-                model: str = _MODEL_STAGE2) -> dict | None:
+                model: str = _MODEL_STAGE2, reflection: str | None = None) -> dict | None:
     """③ 콤보 관찰 핵심 로직(tools/ai_combo_scheduler.py 전용) — 상위 프레임으로 대세 허가(_parent_permits)
     를 먼저 확인하고, 통과했을 때만 Gemini 를 호출(build_combo_prompt). 허가 안 되면 Gemini 호출 없이
     None(무료) — 대세를 거스르는 진입은 코드 차원에서 원천 차단하는 구조적 안전장치는 유지.
@@ -299,7 +329,7 @@ def judge_combo(code: str, parent_timeframe: str, parent_bars: list[dict], child
     if last_trade_date is not None and trade_date == last_trade_date:
         return None
     judgment = call_gemini(
-        build_combo_prompt(code, parent_timeframe, parent_snapshot, child_timeframe, child_snapshot),
+        build_combo_prompt(code, parent_timeframe, parent_snapshot, child_timeframe, child_snapshot, reflection),
         api_key, model)
     if judgment is None:
         return None
@@ -309,7 +339,8 @@ def judge_combo(code: str, parent_timeframe: str, parent_bars: list[dict], child
         "trade_date": trade_date,
         "entry_price": child_snapshot["close"],
         "snapshot": {"parent": parent_snapshot, "child": child_snapshot,
-                     "_prompt_version": _COMBO_PROMPT_VERSION},
+                     "_prompt_version": _COMBO_PROMPT_VERSION,
+                     "_reflection_injected": reflection is not None},
         "model": model,
         **judgment,
     }
